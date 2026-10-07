@@ -1,0 +1,12 @@
+{
+  "name": "my-discord-bot",
+  "version": "1.0.0",
+  "main": "gemini-code-1791385265321.js",
+  "scripts": {
+    "start": "node gemini-code-1791385265321.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  }
+}
