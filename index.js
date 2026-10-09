@@ -2,12 +2,14 @@ require('dotenv').config();
 const fs = require('fs');
 const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionFlagsBits,
-  EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder, ChannelType,
+  EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags,
 } = require('discord.js');
 
 const { TOKEN, CLIENT_ID, GUILD_ID } = process.env;
-const DB_FILE = './db.json';
+// Railway Volume 이 붙어 있으면 그 경로에 저장 (재배포해도 데이터 유지)
+const DB_FILE = process.env.DB_PATH
+  || (process.env.RAILWAY_VOLUME_MOUNT_PATH ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/db.json` : './db.json');
 const EPH = MessageFlags.Ephemeral;
 
 /* ───────────── 데이터 저장 (JSON) ───────────── */
@@ -24,7 +26,6 @@ if (fs.existsSync(DB_FILE)) {
   db = { ...defaultDB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) };
   db.settings = { ...defaultDB.settings, ...db.settings };
 }
-db.sessions ??= {}; // channelId: { userId, amount, depositor, createdAt, busy }
 const save = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 const getUser = (id) => (db.users[id] ??= { balance: 0, checkInAt: null, lastRewardDate: null, totalMinutes: 0 });
 const kstDate = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
@@ -82,21 +83,35 @@ const commands = [
     .addChannelOption((o) => o.setName('채널').setDescription('관리자만 볼 수 있는 채널').setRequired(true))
     .setDefaultMemberPermissions(admin),
   new SlashCommandBuilder().setName('충전안내').setDescription('입금 계좌 및 이중창 인증 방법 보기'),
-  new SlashCommandBuilder().setName('충전패널').setDescription('현재 채널에 충전 신청 버튼 설치 (관리자)')
-    .setDefaultMemberPermissions(admin),
+  new SlashCommandBuilder().setName('충전신청').setDescription('계좌 이체 후 이중창 인증으로 충전 신청')
+    .addIntegerOption((o) => o.setName('금액').setDescription('입금한 금액(원)').setMinValue(1000).setRequired(true))
+    .addStringOption((o) => o.setName('입금자명').setDescription('입금자명').setRequired(true))
+    .addAttachmentOption((o) => o.setName('인증사진').setDescription('이중창 캡처 (이체 화면 + 디스코드 화면 동시)').setRequired(true)),
   new SlashCommandBuilder().setName('잔액').setDescription('내 포인트 확인'),
   new SlashCommandBuilder().setName('출근').setDescription('출근하기'),
   new SlashCommandBuilder().setName('퇴근').setDescription('퇴근하기'),
 ].map((c) => c.toJSON());
 
 /* ───────────── 클라이언트 ───────────── */
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once('clientReady', async () => {
+/* 명령어 등록: 이벤트(ready/clientReady)에 의존하지 않고 시작 시 바로 등록 */
+async function registerCommands() {
+  if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+    console.error('❌ .env 에 TOKEN / CLIENT_ID / GUILD_ID 가 비어있습니다. (파일명이 .env 인지 확인)');
+    process.exit(1);
+  }
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log(`✅ ${client.user.tag} 로그인 / 명령어 등록 완료`);
-});
+  try {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log(`✅ 슬래시 명령어 ${commands.length}개 등록 완료`);
+  } catch (e) {
+    console.error('❌ 명령어 등록 실패:', e.rawError?.message || e.message);
+    console.error('   → CLIENT_ID(애플리케이션 ID), GUILD_ID(서버 ID)가 맞는지, 봇이 그 서버에 초대되어 있는지 확인하세요.');
+    process.exit(1);
+  }
+}
+client.once('clientReady', () => console.log(`✅ ${client.user.tag} 로그인 완료`));
 
 function vendingPanel() {
   const products = Object.values(db.products).slice(0, 25);
@@ -194,55 +209,6 @@ client.on('interactionCreate', async (i) => {
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`buy:${p.id}`).setLabel('구매하기').setStyle(ButtonStyle.Success))],
       });
-    }
-
-    // 충전 신청 버튼 → 금액/입금자명 입력창
-    if (i.isButton() && i.customId === 'charge_open') {
-      return i.showModal(new ModalBuilder().setCustomId('charge_form').setTitle('충전 신청').addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('amount').setLabel('입금 금액(원, 최소 1000)')
-          .setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('depositor').setLabel('입금자명')
-          .setStyle(TextInputStyle.Short).setRequired(true))));
-    }
-
-    // 충전 신청 입력 제출 → 개인 채널 생성
-    if (i.isModalSubmit() && i.customId === 'charge_form') {
-      const st = db.settings;
-      if (!st.bank || !st.chargeChannelId) return i.reply({ content: '충전 기능이 아직 설정되지 않았습니다.', flags: EPH });
-      const amount = parseInt(i.fields.getTextInputValue('amount').replace(/[^0-9]/g, ''), 10);
-      const depositor = i.fields.getTextInputValue('depositor').trim();
-      if (!amount || amount < 1000) return i.reply({ content: '금액은 1,000원 이상 숫자로 입력해주세요.', flags: EPH });
-      if (Object.values(db.sessions).some((x) => x.userId === i.user.id)) {
-        return i.reply({ content: '이미 열려 있는 충전 채널이 있습니다.', flags: EPH });
-      }
-      const pend = Object.values(db.charges).filter((c) => c.userId === i.user.id && c.status === 'pending').length;
-      if (pend >= 3) return i.reply({ content: '처리 대기 중인 충전 요청이 너무 많습니다.', flags: EPH });
-
-      await i.deferReply({ flags: EPH });
-      const P = PermissionFlagsBits;
-      const ch = await i.guild.channels.create({
-        name: `충전-${i.user.username}`.slice(0, 90),
-        type: ChannelType.GuildText,
-        parent: i.channel?.parentId ?? undefined,
-        permissionOverwrites: [
-          { id: i.guild.id, deny: [P.ViewChannel] },
-          { id: i.user.id, allow: [P.ViewChannel, P.SendMessages, P.AttachFiles, P.ReadMessageHistory] },
-          { id: client.user.id, allow: [P.ViewChannel, P.SendMessages, P.AttachFiles, P.EmbedLinks, P.ManageChannels, P.ReadMessageHistory] },
-        ],
-      }).catch(() => null);
-      if (!ch) return i.editReply('❌ 채널 생성 실패. 봇에 채널 관리 권한이 있는지 확인해주세요.');
-      db.sessions[ch.id] = { userId: i.user.id, amount, depositor, createdAt: Date.now(), busy: false };
-      save();
-      await ch.send({
-        content: `${i.user}`,
-        embeds: [new EmbedBuilder().setTitle('💳 충전 인증').setColor(0xfee75c).addFields(
-          { name: '입금 계좌', value: `${st.bank.bank} ${st.bank.number} (예금주 ${st.bank.holder})` },
-          { name: '신청 내용', value: `${amount.toLocaleString()}원 / 입금자명 ${depositor}` },
-          { name: '이중창 인증 방법', value: '1. 위 계좌로 이체합니다.\n2. 폰 화면 분할로 **은행 이체 완료 화면 + 디스코드 화면**을 동시에 띄웁니다.\n3. 그 상태로 캡처해서 **이 채널 메시지창에 사진을 보내세요.**' },
-          { name: '안내', value: '15분 안에 사진을 보내지 않으면 채널이 자동 삭제됩니다. 비밀번호 등 민감 정보는 가리고 보내주세요.' },
-        )],
-      });
-      return i.editReply(`✅ ${ch} 채널이 열렸습니다. 이체 후 그곳에 이중창 캡처를 보내주세요.`);
     }
 
     // 충전 승인/거절 버튼 (관리자 전용)
@@ -356,22 +322,41 @@ client.on('interactionCreate', async (i) => {
         embeds: [new EmbedBuilder().setTitle('💳 계좌 충전 안내').setColor(0x5865f2).addFields(
           { name: '입금 계좌', value: `${b.bank} ${b.number} (예금주 ${b.holder})` },
           { name: '충전 비율', value: '1원 = 1P (최소 1,000원)' },
-          { name: '이중창 인증 방법', value: '1. 계좌로 입금(이체)합니다.\n2. 폰에서 화면 분할(멀티윈도우)로 **은행 이체 완료 화면**과 **디스코드 화면**을 한 화면에 같이 띄웁니다.\n3. 충전 패널의 **충전 신청** 버튼 → 금액/입금자명 입력 → 열린 채널에 캡처를 보냅니다.\n4. 관리자가 확인하면 포인트가 지급되고 DM으로 알려드립니다.' },
+          { name: '이중창 인증 방법', value: '1. 계좌로 입금(이체)합니다.\n2. 폰에서 화면 분할(멀티윈도우)로 **은행 이체 완료 화면**과 **디스코드 화면**을 한 화면에 같이 띄웁니다.\n3. 그 상태로 캡처한 뒤 `/충전신청`에 금액·입금자명·사진을 첨부합니다.\n4. 관리자가 확인하면 포인트가 지급되고 DM으로 알려드립니다.' },
           { name: '주의', value: '입금자명/금액이 사진과 일치해야 합니다. 비밀번호·보안카드 번호 등 민감 정보는 가리고 올려주세요.' },
         )],
       });
     }
-    if (n === '충전패널') {
-      if (!db.settings.bank || !db.settings.chargeChannelId) {
-        return i.reply({ content: '먼저 `/계좌설정`과 `/충전채널`을 설정해주세요.', flags: EPH });
-      }
-      await i.channel.send({
-        embeds: [new EmbedBuilder().setTitle('💳 계좌 충전').setColor(0x5865f2)
-          .setDescription('아래 버튼을 누르면 **나만 볼 수 있는 충전 채널**이 열립니다.\n그 채널에 이체 후 **이중창 인증 사진**을 보내면 관리자에게 전달됩니다.')],
+    if (n === '충전신청') {
+      const s = db.settings;
+      if (!s.bank || !s.chargeChannelId) return i.reply({ content: '충전 기능이 아직 설정되지 않았습니다. 관리자에게 문의하세요.', flags: EPH });
+      const amount = i.options.getInteger('금액');
+      const depositor = i.options.getString('입금자명');
+      const file = i.options.getAttachment('인증사진');
+      if (!file.contentType?.startsWith('image/')) return i.reply({ content: '이미지 파일만 첨부할 수 있습니다.', flags: EPH });
+      const pending = Object.values(db.charges).filter((c) => c.userId === i.user.id && c.status === 'pending').length;
+      if (pending >= 3) return i.reply({ content: '처리 대기 중인 충전 요청이 너무 많습니다. 처리 후 다시 신청해주세요.', flags: EPH });
+
+      await i.deferReply({ flags: EPH });
+      const ch = await client.channels.fetch(s.chargeChannelId).catch(() => null);
+      if (!ch) return i.editReply('관리자 확인 채널을 찾을 수 없습니다. 관리자에게 문의하세요.');
+      const id = String(db.nextChargeId);
+      const msg = await ch.send({
+        embeds: [new EmbedBuilder().setTitle(`💳 충전 요청 #${id}`).setColor(0xfee75c)
+          .addFields(
+            { name: '신청자', value: `${i.user} (${i.user.tag})`, inline: true },
+            { name: '금액', value: `${amount.toLocaleString()}원`, inline: true },
+            { name: '입금자명', value: depositor, inline: true },
+          ).setImage(file.url).setTimestamp()],
         components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('charge_open').setLabel('충전 신청').setStyle(ButtonStyle.Primary))],
-      });
-      return i.reply({ content: '✅ 충전 패널을 설치했습니다.', flags: EPH });
+          new ButtonBuilder().setCustomId(`charge_ok:${id}`).setLabel('승인').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`charge_no:${id}`).setLabel('거절').setStyle(ButtonStyle.Danger))],
+      }).catch(() => null);
+      if (!msg) return i.editReply('관리자 채널에 요청을 보내지 못했습니다. 봇의 채널 권한을 확인해주세요.');
+      db.charges[id] = { id, userId: i.user.id, amount, depositor, imageUrl: file.url, status: 'pending', handledBy: null };
+      db.nextChargeId++;
+      save();
+      return i.editReply(`✅ 충전 요청 #${id}이 접수되었습니다. 관리자 확인 후 ${amount.toLocaleString()}P가 지급되며 DM으로 알려드립니다.`);
     }
     if (n === '잔액') {
       return i.reply({ content: `💰 보유 포인트: **${won(getUser(i.user.id).balance)}**`, flags: EPH });
@@ -403,60 +388,4 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
-/* ───────────── 충전 개인 채널: 사진 수신 → 관리자 채널 전달 ───────────── */
-const SESSION_MS = 15 * 60 * 1000;
-
-async function closeSession(channelId) {
-  delete db.sessions[channelId];
-  save();
-  const ch = await client.channels.fetch(channelId).catch(() => null);
-  await ch?.delete().catch(() => {});
-}
-setInterval(() => {
-  for (const [cid, x] of Object.entries(db.sessions)) {
-    if (Date.now() - x.createdAt > SESSION_MS) closeSession(cid);
-  }
-}, 60 * 1000);
-
-client.on('messageCreate', async (m) => {
-  if (m.author.bot) return;
-  const sess = db.sessions[m.channelId];
-  if (!sess || sess.userId !== m.author.id || sess.busy) return;
-
-  const file = m.attachments.find((a) => a.contentType?.startsWith('image/'));
-  if (!file) return void m.reply('📷 이중창 캡처 **이미지**를 첨부해서 보내주세요.').catch(() => {});
-
-  sess.busy = true;
-  const adminCh = await client.channels.fetch(db.settings.chargeChannelId).catch(() => null);
-  if (!adminCh) {
-    sess.busy = false;
-    return void m.reply('❌ 관리자 확인 채널을 찾을 수 없습니다. 관리자에게 문의하세요.').catch(() => {});
-  }
-  const id = String(db.nextChargeId);
-  const ext = file.contentType.split('/')[1].split(';')[0];
-  const name = `proof.${ext}`;
-  // 개인 채널이 삭제돼도 사진이 남도록 관리자 채널에 사진을 다시 업로드
-  const sent = await adminCh.send({
-    embeds: [new EmbedBuilder().setTitle(`💳 충전 요청 #${id}`).setColor(0xfee75c)
-      .addFields(
-        { name: '신청자', value: `${m.author} (${m.author.tag})`, inline: true },
-        { name: '금액', value: `${sess.amount.toLocaleString()}원`, inline: true },
-        { name: '입금자명', value: sess.depositor, inline: true },
-      ).setImage(`attachment://${name}`).setTimestamp()],
-    files: [new AttachmentBuilder(file.url, { name })],
-    components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`charge_ok:${id}`).setLabel('승인').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`charge_no:${id}`).setLabel('거절').setStyle(ButtonStyle.Danger))],
-  }).catch(() => null);
-  if (!sent) {
-    sess.busy = false;
-    return void m.reply('❌ 관리자 채널에 요청을 보내지 못했습니다. 관리자에게 문의하세요.').catch(() => {});
-  }
-  db.charges[id] = { id, userId: m.author.id, amount: sess.amount, depositor: sess.depositor, imageUrl: file.url, status: 'pending', handledBy: null };
-  db.nextChargeId++;
-  save();
-  await m.reply(`✅ 충전 요청 #${id} 접수 완료! 관리자 확인 후 DM으로 알려드립니다. 이 채널은 5초 뒤 삭제됩니다.`).catch(() => {});
-  setTimeout(() => closeSession(m.channelId), 5000);
-});
-
-client.login(TOKEN);
+registerCommands().then(() => client.login(TOKEN));
