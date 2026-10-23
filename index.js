@@ -18,8 +18,8 @@ const defaultDB = {
   nextChargeId: 1,
   charges: {},  // id: { id, userId, amount, depositor, imageUrl, status, handledBy }
   products: {}, // id: { id, name, price, stock: [string] }
-  users: {},    // uid: { balance, checkInAt, lastRewardDate, totalMinutes }
-  settings: { globalDiscount: 0, roleDiscounts: {}, buyerRoleId: null, attendReward: 100, bank: null, chargeChannelId: null },
+  users: {},    // uid: { balance, checkInAt, totalMinutes }
+  settings: { globalDiscount: 0, roleDiscounts: {}, buyerRoleId: null, bank: null, chargeChannelId: null },
 };
 let db = defaultDB;
 if (fs.existsSync(DB_FILE)) {
@@ -27,9 +27,50 @@ if (fs.existsSync(DB_FILE)) {
   db.settings = { ...defaultDB.settings, ...db.settings };
 }
 const save = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-const getUser = (id) => (db.users[id] ??= { balance: 0, checkInAt: null, lastRewardDate: null, totalMinutes: 0 });
+const getUser = (id) => (db.users[id] ??= { balance: 0, checkInAt: null, totalMinutes: 0 });
 const kstDate = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
 const won = (n) => `${n.toLocaleString()}P`;
+const kstParts = (ts) => {
+  const d = new Date(ts);
+  return {
+    date: d.toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }),
+    time: d.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  };
+};
+const durationText = (ms) => {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+  return `${h}시간 ${m}분 ${s}초`;
+};
+function attendanceEmbed(user, username, mode, now) {
+  const start = user.checkInAt || user.lastCheckInAt || now;
+  const end = mode === 'checkout' ? (user.lastCheckOutAt || now) : null;
+  const date = kstParts(end || start).date;
+  const startTime = kstParts(start).time;
+  const endTime = end ? kstParts(end).time : '근무 중';
+  const currentShiftMs = end ? Math.max(0, end - start) : Math.max(0, now - start);
+  const totalMs = Math.max(0, (user.totalMinutes || 0) * 60000);
+  const embed = new EmbedBuilder()
+    .setColor(mode === 'checkout' ? 0xed4245 : 0x57f287)
+    .setTitle(mode === 'checkout' ? '💖 퇴근 완료 💖' : '🌷 출근 완료 🌷')
+    .setDescription(`☆｡☆ ━━━━━━━━━━━━━ ☆｡☆
+
+🌷 <@${user.discordId || ''}> 님이 ${mode === 'checkout' ? '퇴근' : '출근'}했어요! 🌷
+${mode === 'checkout' ? '오늘 하루도 정말 수고 많으셨어요! 푹 쉬세요 😴💤' : '오늘도 힘내세요! 좋은 하루 보내세요 ☀️'}
+
+☆｡☆ ━━━━━━━━━━━━━ ☆｡☆`)
+    .addFields(
+      { name: '📅 날짜', value: date, inline: false },
+      { name: '🟢 출근', value: startTime, inline: true },
+      { name: '🔴 퇴근', value: endTime, inline: true },
+      { name: '🕒 이번 근무시간', value: durationText(currentShiftMs), inline: false },
+      { name: '⏱️ 누적 근무시간', value: durationText(totalMs + (mode === 'checkout' ? 0 : currentShiftMs)), inline: false },
+      { name: '🎉 상태', value: mode === 'checkout' ? '🔴 퇴근 완료 · 기록 저장됨 🏠' : '🟢 근무 중 · 출근 기록 저장됨 🏢', inline: false },
+    )
+    .setFooter({ text: `DEVELOPER GROUP · 출퇴근 기록 · ${kstParts(now).date} ${kstParts(now).time}` })
+    .setTimestamp(new Date(now));
+  return embed;
+}
 
 /* 할인율: 전체 할인과 보유 역할 할인 중 가장 큰 값 1개만 적용 (중복 적용 X) */
 function getDiscount(member) {
@@ -70,9 +111,6 @@ const commands = [
   new SlashCommandBuilder().setName('잔액지급').setDescription('유저에게 포인트 지급/차감 (관리자)')
     .addUserOption((o) => o.setName('유저').setDescription('대상').setRequired(true))
     .addIntegerOption((o) => o.setName('금액').setDescription('음수면 차감').setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('출근보상').setDescription('하루 첫 출근 보상 포인트 설정 (관리자)')
-    .addIntegerOption((o) => o.setName('금액').setDescription('포인트').setMinValue(0).setRequired(true))
     .setDefaultMemberPermissions(admin),
   new SlashCommandBuilder().setName('계좌설정').setDescription('충전용 입금 계좌 설정 (관리자)')
     .addStringOption((o) => o.setName('은행').setDescription('은행명').setRequired(true))
@@ -301,10 +339,6 @@ client.on('interactionCreate', async (i) => {
       const data = getUser(u.id); data.balance = Math.max(0, data.balance + amt); save();
       return i.reply({ content: `✅ ${u} 잔액: ${won(data.balance)} (${amt >= 0 ? '+' : ''}${amt})`, flags: EPH });
     }
-    if (n === '출근보상') {
-      db.settings.attendReward = i.options.getInteger('금액'); save();
-      return i.reply({ content: `✅ 하루 첫 출근 보상: ${won(db.settings.attendReward)}`, flags: EPH });
-    }
     if (n === '계좌설정') {
       db.settings.bank = { bank: i.options.getString('은행'), number: i.options.getString('계좌번호'), holder: i.options.getString('예금주') };
       save();
@@ -364,22 +398,26 @@ client.on('interactionCreate', async (i) => {
     if (n === '출근') {
       const u = getUser(i.user.id);
       if (u.checkInAt) return i.reply({ content: '이미 출근 상태입니다. `/퇴근`을 먼저 해주세요.', flags: EPH });
-      u.checkInAt = Date.now();
-      let msg = `🏢 출근 완료! (<t:${Math.floor(u.checkInAt / 1000)}:T>)`;
-      const today = kstDate();
-      if (u.lastRewardDate !== today && db.settings.attendReward > 0) {
-        u.balance += db.settings.attendReward; u.lastRewardDate = today;
-        msg += `\n🎁 오늘의 출근 보상 ${won(db.settings.attendReward)} 지급!`;
-      }
+      const now = Date.now();
+      u.discordId = i.user.id;
+      u.checkInAt = now;
+      u.lastCheckInAt = now;
       save();
-      return i.reply(msg);
+      return i.reply({ embeds: [attendanceEmbed(u, i.user.username, 'checkin', now)] });
     }
     if (n === '퇴근') {
       const u = getUser(i.user.id);
       if (!u.checkInAt) return i.reply({ content: '출근 상태가 아닙니다. `/출근`을 먼저 해주세요.', flags: EPH });
-      const mins = Math.floor((Date.now() - u.checkInAt) / 60000);
-      u.totalMinutes += mins; u.checkInAt = null; save();
-      return i.reply(`🏠 퇴근 완료! 오늘 근무 **${Math.floor(mins / 60)}시간 ${mins % 60}분** (누적 ${Math.floor(u.totalMinutes / 60)}시간 ${u.totalMinutes % 60}분)`);
+      const now = Date.now();
+      const elapsedMs = Math.max(0, now - u.checkInAt);
+      u.lastCheckInAt = u.checkInAt;
+      u.lastCheckOutAt = now;
+      u.lastShiftMs = elapsedMs;
+      u.totalMinutes = (u.totalMinutes || 0) + Math.floor(elapsedMs / 60000);
+      u.checkInAt = null;
+      u.discordId = i.user.id;
+      save();
+      return i.reply({ embeds: [attendanceEmbed(u, i.user.username, 'checkout', now)] });
     }
   } catch (e) {
     console.error(e);
