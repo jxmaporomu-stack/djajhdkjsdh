@@ -1,12 +1,20 @@
+```json
 {
   "name": "discord-bot",
   "version": "1.0.0",
+  "private": true,
+  "description": "Discord bot with attendance tracking and vending features",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js && node --check supplier.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "dotenv": "^16.4.5"
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.4.7"
   }
 }
+```
