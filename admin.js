@@ -37,7 +37,8 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         { name: '📦 상품', value: `${st.prods}종 · 재고 ${st.stock}개`, inline: true },
         { name: '💳 대기 중 충전', value: `${st.pend}건`, inline: true },
         { name: '💰 최소 충전', value: won(g.min_charge), inline: true },
-        { name: '📢 로그 채널', value: g.log_channel ? `<#${g.log_channel}>` : '미설정', inline: true },
+        { name: '📢 구매 로그 채널', value: g.log_channel ? `<#${g.log_channel}>` : '미설정', inline: true },
+        { name: '💳 충전 로그 채널', value: g.charge_log_channel ? `<#${g.charge_log_channel}>` : '미설정', inline: true },
         { name: '🏦 계좌 안내', value: g.bank_info ? '설정됨 ✅' : '미설정 ❌', inline: true },
         { name: '🏷️ 구매자 역할', value: g.buyer_role ? `<@&${g.buyer_role}>` : '미설정', inline: true },
         { name: '✍️ 후기 채널', value: g.review_channel ? `<#${g.review_channel}>` : '미설정', inline: true },
@@ -54,7 +55,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         row(
           btn('adm_settings', '계좌·가이드', '💳'),
           btn('adm_brand', '패널 꾸미기', '🎨'),
-          btn('adm_logch', '로그 채널', '📢'),
+          btn('adm_logch', '구매 로그 채널', '📢'),
           btn('adm_balance', '잔액 지급', '💰'),
         ),
         row(
@@ -67,6 +68,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         row(
           btn('adm_role', '구매자 역할', '🏷️'),
           btn('adm_review', '후기 채널(DM 안내)', '✍️'),
+          btn('adm_chglog', '충전 로그 채널', '💳'),
         ),
       ],
     };
@@ -89,11 +91,12 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
   const getProduct = (gid, id) => db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(Number(id), gid);
 
   /* ───── 로그 채널로 알림 ───── */
-  async function log(guild, embed) {
+  // key: 'log_channel'(구매 로그) | 'charge_log_channel'(충전 로그) — 서로 다른 채널로 분리
+  async function log(guild, embed, key = 'log_channel') {
     try {
       const g = q.getGuild(guild.id);
-      if (!g.log_channel) return;
-      const ch = await guild.channels.fetch(g.log_channel).catch(() => null);
+      if (!g[key]) return;
+      const ch = await guild.channels.fetch(g[key]).catch(() => null);
       if (ch && ch.isTextBased()) await ch.send({ embeds: [embed] });
     } catch { /* 로그 실패는 무시 */ }
   }
@@ -158,7 +161,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
 
         case 'adm_logch':
           return i.reply({
-            content: '📢 구매/충전 로그를 받을 채널을 골라 주세요.',
+            content: '📢 **구매 로그**를 받을 채널을 골라 주세요. (충전 로그는 별도 채널이에요)',
             components: [
               row(new ChannelSelectMenuBuilder().setCustomId('adm_s_logch').setPlaceholder('채널 선택')
                 .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
@@ -199,6 +202,21 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         case 'adm_reviewclear':
           db.prepare("UPDATE guilds SET review_channel = '' WHERE guild_id = ?").run(gid);
           return i.update({ content: '🔕 후기 안내 DM을 껐어요.', components: [] });
+
+        case 'adm_chglog':
+          return i.reply({
+            content: '💳 **충전 로그**(충전 승인/거절, 잔액 수동 조정)를 받을 채널을 골라 주세요. 구매 로그와 별도예요.',
+            components: [
+              row(new ChannelSelectMenuBuilder().setCustomId('adm_s_chglog').setPlaceholder('채널 선택')
+                .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
+              row(btn('adm_chglogclear', '충전 로그 끄기', '🔕')),
+            ],
+            ...EPH,
+          });
+
+        case 'adm_chglogclear':
+          db.prepare("UPDATE guilds SET charge_log_channel = '' WHERE guild_id = ?").run(gid);
+          return i.update({ content: '🔕 충전 로그를 껐어요.', components: [] });
 
         case 'adm_balance':
           return i.reply({
@@ -298,15 +316,25 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         db.prepare('UPDATE guilds SET review_channel = ? WHERE guild_id = ?').run(ch.id, gid);
         return i.update({ content: `✅ 후기 채널: <#${ch.id}>\n구매 후 구매자 DM으로 이 채널 안내가 가요.`, components: [] });
       }
+      if (id === 'adm_s_chglog') {
+        const ch = i.channels.first();
+        try {
+          await ch.send({ content: '✅ 이 채널이 자판기 **충전 로그** 채널로 설정되었어요.' });
+        } catch {
+          return i.update({ content: '❌ 그 채널에 메시지를 보낼 권한이 없어요. 봇 권한을 확인해 주세요.', components: [] });
+        }
+        db.prepare('UPDATE guilds SET charge_log_channel = ? WHERE guild_id = ?').run(ch.id, gid);
+        return i.update({ content: `✅ 충전 로그 채널: <#${ch.id}>`, components: [] });
+      }
       if (id === 'adm_s_logch') {
         const ch = i.channels.first();
         try {
-          await ch.send({ content: '✅ 이 채널이 자판기 로그 채널로 설정되었어요.' });
+          await ch.send({ content: '✅ 이 채널이 자판기 **구매 로그** 채널로 설정되었어요.' });
         } catch {
           return i.update({ content: '❌ 그 채널에 메시지를 보낼 권한이 없어요. 봇 권한을 확인해 주세요.', components: [] });
         }
         db.prepare('UPDATE guilds SET log_channel = ? WHERE guild_id = ?').run(ch.id, gid);
-        return i.update({ content: `✅ 로그 채널: <#${ch.id}>`, components: [] });
+        return i.update({ content: `✅ 구매 로그 채널: <#${ch.id}>`, components: [] });
       }
       return;
     }
@@ -342,7 +370,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
             { name: '대상', value: `<@${uid}>`, inline: true },
             { name: '변동', value: `${amt >= 0 ? '+' : ''}${won(amt)}`, inline: true },
             { name: '잔액', value: won(u.balance), inline: true },
-          ).setTimestamp());
+          ).setTimestamp(), 'charge_log_channel');
         return i.reply({ content: `✅ <@${uid}> 잔액: **${won(u.balance)}**`, ...EPH });
       }
 

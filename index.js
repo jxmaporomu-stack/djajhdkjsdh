@@ -515,7 +515,7 @@ async function handleChargeDecision(i) {
   const base = EmbedBuilder.from(i.message.embeds[0]).setColor(approve ? 0x57f287 : 0xed4245)
     .addFields({ name: '처리 결과', value: approve ? '✅ 승인됨' : '❌ 거절됨' });
   await i.update({ embeds: [base], components: [] });
-  admin.log(guild, base);
+  admin.log(guild, base, 'charge_log_channel');
 
   const bal = q.getUser(c.guild_id, c.user_id).balance;
   client.users.send(c.user_id, approve
