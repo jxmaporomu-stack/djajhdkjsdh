@@ -1,20 +1,16 @@
-
 {
-  "name": "discord-bot",
+  "name": "vending-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "Discord bot with attendance tracking and vending features",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "check": "node --check index.js && node --check supplier.js"
-  },
-  "engines": {
-    "node": ">=20.0.0"
+    "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.19.3",
-    "dotenv": "^16.4.7"
+    "better-sqlite3": "^11.3.0",
+    "discord.js": "^14.16.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
-
