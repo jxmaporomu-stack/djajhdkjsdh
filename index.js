@@ -267,18 +267,55 @@ async function handleButton(i) {
   // 구매 확정 버튼
   if (i.customId.startsWith('buy:')) {
     const res = buy(gid, i.user.id, Number(i.customId.split(':')[1]));
-    if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });
-    admin.log(i.guild, new EmbedBuilder().setColor(0x57f287).setTitle('🛒 구매 로그')
-      .addFields(
-        { name: '유저', value: `${i.user} (${i.user.tag})`, inline: true },
-        { name: '상품', value: res.product.name, inline: true },
-        { name: '금액', value: won(res.product.price), inline: true },
-      ).setTimestamp());
-    await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
+    if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });    await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
     i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
+    await afterPurchase(i, res);
     return;
   }
   if (i.customId === 'buy_cancel') return i.update({ content: '구매를 취소했어요.', components: [] });
+}
+
+/* ───────────── 구매 후 처리 (역할 지급 / 구매 로그 / 후기 안내 DM) ───────────── */
+async function afterPurchase(i, res) {
+  const g = q.getGuild(i.guildId);
+
+  // 1) 구매자 역할 지급
+  let roleNote = '';
+  if (g.buyer_role) {
+    try {
+      await i.member.roles.add(g.buyer_role, '자판기 구매 역할 지급');
+      roleNote = `<@&${g.buyer_role}> 지급 완료 ✅`;
+    } catch (e) {
+      console.warn('역할 지급 실패:', e.message);
+      roleNote = '❌ 역할 지급 실패 (봇 권한/역할 순서 확인)';
+    }
+  }
+
+  // 2) 구매 로그 채널에 기록
+  const line = '═'.repeat(28);
+  const log = new EmbedBuilder().setColor(0x57f287)
+    .setTitle('💎🩷🤍🖤📦 새로운 구매 발생')
+    .setDescription([
+      line,
+      '═'.repeat(14),
+      `• **구매자:** ${i.user} (\`${i.user.id}\`)`,
+      `• **상품명:** ${res.product.name}`,
+      `• **결제금액:** \`${won(res.product.price)}\``,
+      ...(roleNote ? [`• **구매자 역할:** ${roleNote}`] : []),
+    ].join('\n'))
+    .setFooter({ text: g.footer_text || `✦ ${BOT_NAME} ✦` }).setTimestamp();
+  admin.log(i.guild, log);
+
+  // 3) 구매자 DM으로 후기 작성 안내
+  if (g.review_channel) {
+    const url = `https://discord.com/channels/${i.guildId}/${g.review_channel}`;
+    const dm = new EmbedBuilder().setColor(0xff88cc).setTitle('💌 구매해 주셔서 감사해요!')
+      .setDescription(`**${i.guild.name}** 에서 **${res.product.name}** 을(를) 구매하셨어요.\n구매 후기를 <#${g.review_channel}> 채널에 남겨 주시면 큰 힘이 돼요 🙏`);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('후기 남기러 가기').setStyle(ButtonStyle.Link).setURL(url),
+    );
+    await i.user.send({ embeds: [dm], components: [row] }).catch(() => {});
+  }
 }
 
 /* ───────────── 출퇴근 ───────────── */

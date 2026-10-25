@@ -1,8 +1,8 @@
 // 서버 주인용 관리 패널 (/관리) — 버튼/선택메뉴/모달로 설정 전부 처리
 const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
-  UserSelectMenuBuilder, ChannelSelectMenuBuilder, ChannelType, ModalBuilder,
-  TextInputBuilder, TextInputStyle,
+  UserSelectMenuBuilder, ChannelSelectMenuBuilder, RoleSelectMenuBuilder, ChannelType,
+  PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const { db, q, redeemLicense } = require('./db');
 
@@ -39,6 +39,8 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         { name: '💰 최소 충전', value: won(g.min_charge), inline: true },
         { name: '📢 로그 채널', value: g.log_channel ? `<#${g.log_channel}>` : '미설정', inline: true },
         { name: '🏦 계좌 안내', value: g.bank_info ? '설정됨 ✅' : '미설정 ❌', inline: true },
+        { name: '🏷️ 구매자 역할', value: g.buyer_role ? `<@&${g.buyer_role}>` : '미설정', inline: true },
+        { name: '✍️ 후기 채널', value: g.review_channel ? `<#${g.review_channel}>` : '미설정', inline: true },
       );
     return {
       embeds: [embed],
@@ -61,6 +63,10 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           btn('adm_stats', '통계', '📊'),
           btn('adm_lic', '라이센스 등록', '🔑'),
           btn('adm_home', '새로고침', '🔄'),
+        ),
+        row(
+          btn('adm_role', '구매자 역할', '🏷️'),
+          btn('adm_review', '후기 채널(DM 안내)', '✍️'),
         ),
       ],
     };
@@ -165,6 +171,35 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           db.prepare("UPDATE guilds SET log_channel = '' WHERE guild_id = ?").run(gid);
           return i.update({ content: '🔕 로그 채널을 해제했어요.', components: [] });
 
+        case 'adm_role':
+          return i.reply({
+            content: '🏷️ 구매 시 자동으로 지급할 역할을 골라 주세요.\n(봇에게 **역할 관리** 권한이 있고, 봇 역할이 이 역할보다 위에 있어야 해요)',
+            components: [
+              row(new RoleSelectMenuBuilder().setCustomId('adm_s_role').setPlaceholder('역할 선택')),
+              row(btn('adm_roleclear', '역할 지급 끄기', '🚫')),
+            ],
+            ...EPH,
+          });
+
+        case 'adm_roleclear':
+          db.prepare("UPDATE guilds SET buyer_role = '' WHERE guild_id = ?").run(gid);
+          return i.update({ content: '🚫 구매자 역할 지급을 껐어요.', components: [] });
+
+        case 'adm_review':
+          return i.reply({
+            content: '✍️ 구매 후 구매자 DM으로 안내할 **후기 채널**을 골라 주세요.',
+            components: [
+              row(new ChannelSelectMenuBuilder().setCustomId('adm_s_review').setPlaceholder('채널 선택')
+                .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum)),
+              row(btn('adm_reviewclear', '후기 DM 끄기', '🔕')),
+            ],
+            ...EPH,
+          });
+
+        case 'adm_reviewclear':
+          db.prepare("UPDATE guilds SET review_channel = '' WHERE guild_id = ?").run(gid);
+          return i.update({ content: '🔕 후기 안내 DM을 껐어요.', components: [] });
+
         case 'adm_balance':
           return i.reply({
             content: '💰 잔액을 지급/차감할 유저를 골라 주세요.',
@@ -242,6 +277,26 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         return i.showModal(modal(`adm_m_bal:${uid}`, '잔액 지급 / 차감',
           ti('amount', '금액 (차감은 앞에 - 붙이기)', TextInputStyle.Short, { max: 12, placeholder: '예: 5000 또는 -3000' }),
         ));
+      }
+      if (id === 'adm_s_role') {
+        const role = i.roles.first();
+        const me = i.guild.members.me;
+        if (role.id === gid || role.managed) {
+          return i.update({ content: '❌ 이 역할은 지급할 수 없어요. (@everyone 또는 봇/연동 전용 역할)', components: [] });
+        }
+        if (!me || !me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+          return i.update({ content: '❌ 봇에게 **역할 관리** 권한이 없어요. 서버 설정에서 봇 권한을 켜 주세요.', components: [] });
+        }
+        if (role.position >= me.roles.highest.position) {
+          return i.update({ content: `❌ 봇 역할이 ${role} 보다 위에 있어야 해요. 서버 설정 → 역할에서 봇 역할을 위로 올려 주세요.`, components: [] });
+        }
+        db.prepare('UPDATE guilds SET buyer_role = ? WHERE guild_id = ?').run(role.id, gid);
+        return i.update({ content: `✅ 구매자에게 ${role} 역할을 자동 지급해요.`, components: [] });
+      }
+      if (id === 'adm_s_review') {
+        const ch = i.channels.first();
+        db.prepare('UPDATE guilds SET review_channel = ? WHERE guild_id = ?').run(ch.id, gid);
+        return i.update({ content: `✅ 후기 채널: <#${ch.id}>\n구매 후 구매자 DM으로 이 채널 안내가 가요.`, components: [] });
       }
       if (id === 'adm_s_logch') {
         const ch = i.channels.first();
