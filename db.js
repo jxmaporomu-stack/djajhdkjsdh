@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS attendance (
 );
 `);
 
+// 기존 DB에 새 설정 컬럼 추가 (이미 있으면 건너뜀)
+const guildCols = db.prepare('PRAGMA table_info(guilds)').all().map((c) => c.name);
+for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text']) {
+  if (!guildCols.includes(col)) db.exec(`ALTER TABLE guilds ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+}
+
 const q = {
   getGuild(guildId) {
     db.prepare('INSERT OR IGNORE INTO guilds (guild_id) VALUES (?)').run(guildId);

@@ -6,6 +6,7 @@ const {
   SlashCommandBuilder, MessageFlags,
 } = require('discord.js');
 const { db, q, buy, approveCharge, rejectCharge, redeemLicense } = require('./db');
+const makeAdmin = require('./admin');
 
 const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
 const FREE_GUILDS = (process.env.FREE_GUILD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -41,10 +42,16 @@ const commands = [
   new SlashCommandBuilder().setName('라이센스목록').setDescription('미사용 라이센스 목록 (봇 판매자 전용)'),
   new SlashCommandBuilder().setName('출퇴근패널').setDescription('출퇴근 패널을 이 채널에 올립니다 (서버 주인 전용)'),
   new SlashCommandBuilder().setName('출퇴근기록').setDescription('내 출퇴근 기록 확인'),
+  new SlashCommandBuilder().setName('관리').setDescription('자판기 관리 패널 열기 (서버 주인 전용)'),
 ].map((c) => c.toJSON());
 
 client.once('ready', async () => {
+  // 전역 명령어를 이 봇의 명령어로 통째로 교체 (예전에 등록된 전역 명령어 제거)
   await client.application.commands.set(commands);
+  // 예전 코드가 서버(길드) 단위로 등록해 둔 명령어도 모두 제거 → 중복 표시 방지
+  for (const guild of client.guilds.cache.values()) {
+    await guild.commands.set([]).catch((e) => console.warn(`길드 명령어 정리 실패 (${guild.name}):`, e.message));
+  }
   console.log(`✅ 로그인: ${client.user.tag}`);
 });
 
@@ -59,9 +66,10 @@ function makeKey() {
 }
 
 function panelPayload(guild) {
+  const g = q.getGuild(guild.id);
   const embed = new EmbedBuilder()
-    .setColor(0xff88cc)
-    .setTitle('💎💜 24시간 무인 자판기 💜💎')
+    .setColor(g.panel_color ? parseInt(g.panel_color.slice(1), 16) : 0xff88cc)
+    .setTitle(g.panel_title || '💎💜 24시간 무인 자판기 💜💎')
     .setDescription(
       [
         '━━━━━━━━━━━━━━━━━━━━━━',
@@ -73,7 +81,7 @@ function panelPayload(guild) {
         '✨ 아래 버튼을 눌러 이용해 주세요. 모든 응답은 **나에게만** 안전하게 보여요 🔒',
       ].join('\n'),
     )
-    .setFooter({ text: `✦ ${BOT_NAME} ✦` })
+    .setFooter({ text: g.footer_text || `✦ ${BOT_NAME} ✦` })
     .setTimestamp();
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('store').setLabel('제품스토어').setStyle(ButtonStyle.Primary),
@@ -83,6 +91,14 @@ function panelPayload(guild) {
   );
   return { embeds: [embed], components: [row] };
 }
+
+const licenseText = (gid) => {
+  if (FREE_GUILDS.includes(gid)) return '♾️ 무제한';
+  const exp = q.getGuild(gid).expires_at;
+  return exp > Date.now() ? `✅ ${ts(exp)} 까지` : '⛔ 만료 / 미등록';
+};
+
+const admin = makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload, licenseText });
 
 /* ───────────── 메인 핸들러 ───────────── */
 client.on('interactionCreate', async (i) => {
@@ -105,6 +121,7 @@ client.on('interactionCreate', async (i) => {
       });
     }
 
+    if (admin.owns(i)) return await admin.handle(i);
     if (i.isChatInputCommand()) return await handleCommand(i);
     if (i.isButton()) return await handleButton(i);
     if (i.isStringSelectMenu()) return await handleSelect(i);
@@ -128,15 +145,10 @@ async function handleCommand(i) {
       await i.channel.send(panelPayload(i.guild));
       return i.reply({ content: '✅ 패널을 올렸어요.', ...EPH });
     }
+    case '관리':
+      return i.reply({ ...admin.home(gid), ...EPH });
     case '출퇴근패널': {
-      const embed = new EmbedBuilder().setColor(0xffa07a).setTitle('🕘 출퇴근 기록')
-        .setDescription('아래 버튼으로 출근/퇴근을 기록해 주세요.\n근무 시간은 퇴근 시 자동으로 계산돼요. 💫')
-        .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` });
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('clock_in').setLabel('출근').setEmoji('🟢').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('clock_out').setLabel('퇴근').setEmoji('🔴').setStyle(ButtonStyle.Danger),
-      );
-      await i.channel.send({ embeds: [embed], components: [row] });
+      await i.channel.send(clockPanelPayload(gid));
       return i.reply({ content: '✅ 출퇴근 패널을 올렸어요.', ...EPH });
     }
     case '설정': {
@@ -256,6 +268,12 @@ async function handleButton(i) {
   if (i.customId.startsWith('buy:')) {
     const res = buy(gid, i.user.id, Number(i.customId.split(':')[1]));
     if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });
+    admin.log(i.guild, new EmbedBuilder().setColor(0x57f287).setTitle('🛒 구매 로그')
+      .addFields(
+        { name: '유저', value: `${i.user} (${i.user.tag})`, inline: true },
+        { name: '상품', value: res.product.name, inline: true },
+        { name: '금액', value: won(res.product.price), inline: true },
+      ).setTimestamp());
     await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
     i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
     return;
@@ -278,6 +296,18 @@ const fmtDur = (ms) => {
 };
 const rel = (ms) => `<t:${Math.floor(ms / 1000)}:R>`;
 const SPARKLE = '⋆｡°✩ ─────────────── ✩°｡⋆';
+const footerOf = (gid) => q.getGuild(gid).footer_text || BOT_NAME;
+
+function clockPanelPayload(gid) {
+  const embed = new EmbedBuilder().setColor(0xffa07a).setTitle('🕘 출퇴근 기록')
+    .setDescription('아래 버튼으로 출근/퇴근을 기록해 주세요.\n근무 시간은 퇴근 시 자동으로 계산돼요. 💫')
+    .setFooter({ text: `${footerOf(gid)} · 출퇴근 기록 💫` });
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('clock_in').setLabel('출근').setEmoji('🟢').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('clock_out').setLabel('퇴근').setEmoji('🔴').setStyle(ButtonStyle.Danger),
+  );
+  return { embeds: [embed], components: [row] };
+}
 
 async function clockIn(i) {
   const gid = i.guildId;
@@ -295,7 +325,7 @@ async function clockIn(i) {
       { name: '🟢 출근', value: `\`${fmtTime(now)}\``, inline: true },
       { name: '🎉 상태', value: `🟢 **근무 중** · ${rel(now)} 출근 💼` },
     )
-    .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` }).setTimestamp();
+    .setFooter({ text: `${footerOf(i.guildId)} · 출퇴근 기록 💫` }).setTimestamp();
   return i.reply({ embeds: [embed] });
 }
 
@@ -317,7 +347,7 @@ async function clockOut(i) {
       { name: '🕒 총 근무시간', value: `\`${fmtDur(now - open.clock_in)}\`` },
       { name: '🎉 상태', value: `🔴 **퇴근 완료** · ${rel(now)} 퇴근 🏡` },
     )
-    .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` }).setTimestamp();
+    .setFooter({ text: `${footerOf(i.guildId)} · 출퇴근 기록 💫` }).setTimestamp();
   return i.reply({ embeds: [embed] });
 }
 
@@ -448,6 +478,7 @@ async function handleChargeDecision(i) {
   const base = EmbedBuilder.from(i.message.embeds[0]).setColor(approve ? 0x57f287 : 0xed4245)
     .addFields({ name: '처리 결과', value: approve ? '✅ 승인됨' : '❌ 거절됨' });
   await i.update({ embeds: [base], components: [] });
+  admin.log(guild, base);
 
   const bal = q.getUser(c.guild_id, c.user_id).balance;
   client.users.send(c.user_id, approve
