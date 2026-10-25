@@ -39,6 +39,8 @@ const commands = [
       .addChoices({ name: '1개월 (30일)', value: 30 }, { name: '2개월 (60일)', value: 60 }, { name: '3개월 (90일)', value: 90 }))
     .addIntegerOption((o) => o.setName('개수').setDescription('생성 개수 (기본 1, 최대 20)').setMinValue(1).setMaxValue(20)),
   new SlashCommandBuilder().setName('라이센스목록').setDescription('미사용 라이센스 목록 (봇 판매자 전용)'),
+  new SlashCommandBuilder().setName('출퇴근패널').setDescription('출퇴근 패널을 이 채널에 올립니다 (서버 주인 전용)'),
+  new SlashCommandBuilder().setName('출퇴근기록').setDescription('내 출퇴근 기록 확인'),
 ].map((c) => c.toJSON());
 
 client.once('ready', async () => {
@@ -117,6 +119,7 @@ client.on('interactionCreate', async (i) => {
 
 /* ───────────── 슬래시 커맨드 (서버 주인용) ───────────── */
 async function handleCommand(i) {
+  if (i.commandName === '출퇴근기록') return myAttendance(i);
   if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인만 사용할 수 있는 명령어예요.', ...EPH });
   const gid = i.guildId;
 
@@ -124,6 +127,17 @@ async function handleCommand(i) {
     case '패널': {
       await i.channel.send(panelPayload(i.guild));
       return i.reply({ content: '✅ 패널을 올렸어요.', ...EPH });
+    }
+    case '출퇴근패널': {
+      const embed = new EmbedBuilder().setColor(0xffa07a).setTitle('🕘 출퇴근 기록')
+        .setDescription('아래 버튼으로 출근/퇴근을 기록해 주세요.\n근무 시간은 퇴근 시 자동으로 계산돼요. 💫')
+        .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` });
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('clock_in').setLabel('출근').setEmoji('🟢').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('clock_out').setLabel('퇴근').setEmoji('🔴').setStyle(ButtonStyle.Danger),
+      );
+      await i.channel.send({ embeds: [embed], components: [row] });
+      return i.reply({ content: '✅ 출퇴근 패널을 올렸어요.', ...EPH });
     }
     case '설정': {
       const g = q.getGuild(gid);
@@ -189,6 +203,9 @@ async function handleCommand(i) {
 async function handleButton(i) {
   const gid = i.guildId;
 
+  if (i.customId === 'clock_in') return clockIn(i);
+  if (i.customId === 'clock_out') return clockOut(i);
+
   if (i.customId === 'store') {
     const cats = db.prepare(`SELECT p.category, COUNT(*) AS n,
                                SUM((SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0)) AS cnt
@@ -244,6 +261,76 @@ async function handleButton(i) {
     return;
   }
   if (i.customId === 'buy_cancel') return i.update({ content: '구매를 취소했어요.', components: [] });
+}
+
+/* ───────────── 출퇴근 ───────────── */
+const KST = 'Asia/Seoul';
+const fmtTime = (ms) => new Date(ms).toLocaleTimeString('en-GB', {
+  timeZone: KST, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+});
+const fmtDate = (ms) => {
+  const d = new Date(ms);
+  return `${d.toLocaleDateString('en-CA', { timeZone: KST })} (${d.toLocaleDateString('ko-KR', { timeZone: KST, weekday: 'short' })})`;
+};
+const fmtDur = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 3600)}시간 ${Math.floor((s % 3600) / 60)}분 ${s % 60}초`;
+};
+const rel = (ms) => `<t:${Math.floor(ms / 1000)}:R>`;
+const SPARKLE = '⋆｡°✩ ─────────────── ✩°｡⋆';
+
+async function clockIn(i) {
+  const gid = i.guildId;
+  const open = db.prepare('SELECT * FROM attendance WHERE guild_id = ? AND user_id = ? AND clock_out IS NULL').get(gid, i.user.id);
+  if (open) return i.reply({ content: `⚠️ 이미 출근 중이에요! (출근 ${rel(open.clock_in)})\n먼저 퇴근 버튼을 눌러 주세요.`, ...EPH });
+
+  const now = Date.now();
+  db.prepare('INSERT INTO attendance (guild_id, user_id, clock_in) VALUES (?,?,?)').run(gid, i.user.id, now);
+
+  const embed = new EmbedBuilder().setColor(0x57f287).setThumbnail(i.user.displayAvatarURL())
+    .setTitle('☀️💖 출 근 완 료 💖☀️')
+    .setDescription(`${SPARKLE}\n🌷 ${i.user} 님이 출근했어요! 🌷\n☕ 오늘 하루도 힘내세요! 화이팅 💪\n${SPARKLE}`)
+    .addFields(
+      { name: '📅 날짜', value: `\`${fmtDate(now)}\`` },
+      { name: '🟢 출근', value: `\`${fmtTime(now)}\``, inline: true },
+      { name: '🎉 상태', value: `🟢 **근무 중** · ${rel(now)} 출근 💼` },
+    )
+    .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` }).setTimestamp();
+  return i.reply({ embeds: [embed] });
+}
+
+async function clockOut(i) {
+  const gid = i.guildId;
+  const open = db.prepare('SELECT * FROM attendance WHERE guild_id = ? AND user_id = ? AND clock_out IS NULL ORDER BY id DESC').get(gid, i.user.id);
+  if (!open) return i.reply({ content: '⚠️ 출근 기록이 없어요. 먼저 출근 버튼을 눌러 주세요.', ...EPH });
+
+  const now = Date.now();
+  db.prepare('UPDATE attendance SET clock_out = ? WHERE id = ?').run(now, open.id);
+
+  const embed = new EmbedBuilder().setColor(0xffa07a).setThumbnail(i.user.displayAvatarURL())
+    .setTitle('🌙💖 퇴 근 완 료 💖🌙')
+    .setDescription(`${SPARKLE}\n🌷 ${i.user} 님이 퇴근했어요! 🌷\n🛁 오늘 하루도 정말 수고 많으셨어요! 푹 쉬세요 😴\n${SPARKLE}`)
+    .addFields(
+      { name: '📅 날짜', value: `\`${fmtDate(open.clock_in)}\`` },
+      { name: '🟢 출근', value: `\`${fmtTime(open.clock_in)}\``, inline: true },
+      { name: '🔴 퇴근', value: `\`${fmtTime(now)}\``, inline: true },
+      { name: '🕒 총 근무시간', value: `\`${fmtDur(now - open.clock_in)}\`` },
+      { name: '🎉 상태', value: `🔴 **퇴근 완료** · ${rel(now)} 퇴근 🏡` },
+    )
+    .setFooter({ text: `${BOT_NAME} · 출퇴근 기록 💫` }).setTimestamp();
+  return i.reply({ embeds: [embed] });
+}
+
+async function myAttendance(i) {
+  const gid = i.guildId;
+  const rows = db.prepare('SELECT * FROM attendance WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 7').all(gid, i.user.id);
+  const sum = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(clock_out - clock_in), 0) AS t FROM attendance WHERE guild_id = ? AND user_id = ? AND clock_out IS NOT NULL').get(gid, i.user.id);
+  if (!rows.length) return i.reply({ content: '아직 출퇴근 기록이 없어요.', ...EPH });
+  const lines = rows.map((r) => `\`${fmtDate(r.clock_in)}\` ${fmtTime(r.clock_in)} ~ ${r.clock_out ? `${fmtTime(r.clock_out)} (${fmtDur(r.clock_out - r.clock_in)})` : '**근무 중** 🟢'}`);
+  const embed = new EmbedBuilder().setColor(0xffa07a).setTitle('📋 내 출퇴근 기록')
+    .setDescription(lines.join('\n'))
+    .addFields({ name: '누적', value: `${sum.n}회 · ${fmtDur(sum.t)}` });
+  return i.reply({ embeds: [embed], ...EPH });
 }
 
 /* ───────────── 셀렉트 메뉴 ───────────── */
