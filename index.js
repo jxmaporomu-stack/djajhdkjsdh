@@ -1,429 +1,402 @@
 require('dotenv').config();
-const fs = require('fs');
+const crypto = require('crypto');
 const {
-  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, PermissionFlagsBits,
-  EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags,
+  Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
+  SlashCommandBuilder, MessageFlags,
 } = require('discord.js');
+const { db, q, buy, approveCharge, rejectCharge, redeemLicense } = require('./db');
 
-const { TOKEN, CLIENT_ID, GUILD_ID } = process.env;
-// Railway Volume 이 붙어 있으면 그 경로에 저장 (재배포해도 데이터 유지)
-const DB_FILE = process.env.DB_PATH
-  || (process.env.RAILWAY_VOLUME_MOUNT_PATH ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/db.json` : './db.json');
-const EPH = MessageFlags.Ephemeral;
+const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
+const FREE_GUILDS = (process.env.FREE_GUILD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const EPH = { flags: MessageFlags.Ephemeral };
+const won = (n) => `${Number(n).toLocaleString()}원`;
+const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
 
-/* ───────────── 데이터 저장 (JSON) ───────────── */
-const defaultDB = {
-  nextId: 1,
-  nextChargeId: 1,
-  charges: {},  // id: { id, userId, amount, depositor, imageUrl, status, handledBy }
-  products: {}, // id: { id, name, price, stock: [string] }
-  users: {},    // uid: { balance, checkInAt, totalMinutes }
-  settings: { globalDiscount: 0, roleDiscounts: {}, buyerRoleId: null, bank: null, chargeChannelId: null },
-};
-let db = defaultDB;
-if (fs.existsSync(DB_FILE)) {
-  db = { ...defaultDB, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) };
-  db.settings = { ...defaultDB.settings, ...db.settings };
-}
-const save = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-const getUser = (id) => (db.users[id] ??= { balance: 0, checkInAt: null, totalMinutes: 0 });
-const kstDate = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
-const won = (n) => `${n.toLocaleString()}P`;
-const kstParts = (ts) => {
-  const d = new Date(ts);
-  return {
-    date: d.toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }),
-    time: d.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-  };
-};
-const durationText = (ms) => {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
-  return `${h}시간 ${m}분 ${s}초`;
-};
-function attendanceEmbed(user, username, mode, now) {
-  const start = user.checkInAt || user.lastCheckInAt || now;
-  const end = mode === 'checkout' ? (user.lastCheckOutAt || now) : null;
-  const date = kstParts(end || start).date;
-  const startTime = kstParts(start).time;
-  const endTime = end ? kstParts(end).time : '근무 중';
-  const currentShiftMs = end ? Math.max(0, end - start) : Math.max(0, now - start);
-  const totalMs = Math.max(0, (user.totalMinutes || 0) * 60000);
-  const embed = new EmbedBuilder()
-    .setColor(mode === 'checkout' ? 0xed4245 : 0x57f287)
-    .setTitle(mode === 'checkout' ? '💖 퇴근 완료 💖' : '🌷 출근 완료 🌷')
-    .setDescription(`☆｡☆ ━━━━━━━━━━━━━ ☆｡☆
-
-🌷 <@${user.discordId || ''}> 님이 ${mode === 'checkout' ? '퇴근' : '출근'}했어요! 🌷
-${mode === 'checkout' ? '오늘 하루도 정말 수고 많으셨어요! 푹 쉬세요 😴💤' : '오늘도 힘내세요! 좋은 하루 보내세요 ☀️'}
-
-☆｡☆ ━━━━━━━━━━━━━ ☆｡☆`)
-    .addFields(
-      { name: '📅 날짜', value: date, inline: false },
-      { name: '🟢 출근', value: startTime, inline: true },
-      { name: '🔴 퇴근', value: endTime, inline: true },
-      { name: '🕒 이번 근무시간', value: durationText(currentShiftMs), inline: false },
-      { name: '⏱️ 누적 근무시간', value: durationText(totalMs + (mode === 'checkout' ? 0 : currentShiftMs)), inline: false },
-      { name: '🎉 상태', value: mode === 'checkout' ? '🔴 퇴근 완료 · 기록 저장됨 🏠' : '🟢 근무 중 · 출근 기록 저장됨 🏢', inline: false },
-    )
-    .setFooter({ text: `DEVELOPER GROUP · 출퇴근 기록 · ${kstParts(now).date} ${kstParts(now).time}` })
-    .setTimestamp(new Date(now));
-  return embed;
-}
-
-/* 할인율: 전체 할인과 보유 역할 할인 중 가장 큰 값 1개만 적용 (중복 적용 X) */
-function getDiscount(member) {
-  let pct = db.settings.globalDiscount;
-  for (const [rid, p] of Object.entries(db.settings.roleDiscounts)) {
-    if (member.roles.cache.has(rid) && p > pct) pct = p;
-  }
-  return pct;
-}
-const finalPrice = (price, pct) => Math.floor((price * (100 - pct)) / 100);
-
-/* ───────────── 슬래시 명령어 정의 ───────────── */
-const admin = PermissionFlagsBits.Administrator;
-const productOpt = (o) => o.setName('상품').setDescription('상품').setAutocomplete(true).setRequired(true);
-const commands = [
-  new SlashCommandBuilder().setName('상품추가').setDescription('상품 등록 (관리자)')
-    .addStringOption((o) => o.setName('이름').setDescription('상품 이름').setRequired(true))
-    .addIntegerOption((o) => o.setName('가격').setDescription('가격(포인트)').setMinValue(0).setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('상품삭제').setDescription('상품 삭제 (관리자)')
-    .addStringOption(productOpt).setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('재고추가').setDescription('재고 추가 - 한 줄에 상품 1개 (관리자)')
-    .addStringOption(productOpt).setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('상품목록').setDescription('상품/재고 현황 (관리자)')
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('자판기설치').setDescription('현재 채널에 자판기 메시지 설치 (관리자)')
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('전체할인').setDescription('전체 할인율 설정 (관리자)')
-    .addIntegerOption((o) => o.setName('퍼센트').setDescription('0~100 (0이면 해제)').setMinValue(0).setMaxValue(100).setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('역할할인').setDescription('특정 역할 할인율 설정 (관리자)')
-    .addRoleOption((o) => o.setName('역할').setDescription('할인 받을 역할').setRequired(true))
-    .addIntegerOption((o) => o.setName('퍼센트').setDescription('0~100 (0이면 해제)').setMinValue(0).setMaxValue(100).setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('구매자역할').setDescription('구매 시 지급할 역할 설정 (관리자)')
-    .addRoleOption((o) => o.setName('역할').setDescription('구매자 역할').setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('잔액지급').setDescription('유저에게 포인트 지급/차감 (관리자)')
-    .addUserOption((o) => o.setName('유저').setDescription('대상').setRequired(true))
-    .addIntegerOption((o) => o.setName('금액').setDescription('음수면 차감').setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('계좌설정').setDescription('충전용 입금 계좌 설정 (관리자)')
-    .addStringOption((o) => o.setName('은행').setDescription('은행명').setRequired(true))
-    .addStringOption((o) => o.setName('계좌번호').setDescription('계좌번호').setRequired(true))
-    .addStringOption((o) => o.setName('예금주').setDescription('예금주').setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('충전채널').setDescription('충전 요청이 올라올 관리자 채널 설정 (관리자)')
-    .addChannelOption((o) => o.setName('채널').setDescription('관리자만 볼 수 있는 채널').setRequired(true))
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('충전안내').setDescription('입금 계좌 및 이중창 인증 방법 보기'),
-  new SlashCommandBuilder().setName('충전신청').setDescription('계좌 이체 후 이중창 인증으로 충전 신청')
-    .addIntegerOption((o) => o.setName('금액').setDescription('입금한 금액(원)').setMinValue(1000).setRequired(true))
-    .addStringOption((o) => o.setName('입금자명').setDescription('입금자명').setRequired(true))
-    .addAttachmentOption((o) => o.setName('인증사진').setDescription('이중창 캡처 (이체 화면 + 디스코드 화면 동시)').setRequired(true)),
-  new SlashCommandBuilder().setName('잔액').setDescription('내 포인트 확인'),
-  new SlashCommandBuilder().setName('출근').setDescription('출근하기'),
-  new SlashCommandBuilder().setName('퇴근').setDescription('퇴근하기'),
-].map((c) => c.toJSON());
-
-/* ───────────── 클라이언트 ───────────── */
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-/* 명령어 등록: 이벤트(ready/clientReady)에 의존하지 않고 시작 시 바로 등록 */
-async function registerCommands() {
-  if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-    console.error('❌ .env 에 TOKEN / CLIENT_ID / GUILD_ID 가 비어있습니다. (파일명이 .env 인지 확인)');
-    process.exit(1);
-  }
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log(`✅ 슬래시 명령어 ${commands.length}개 등록 완료`);
-  } catch (e) {
-    console.error('❌ 명령어 등록 실패:', e.rawError?.message || e.message);
-    console.error('   → CLIENT_ID(애플리케이션 ID), GUILD_ID(서버 ID)가 맞는지, 봇이 그 서버에 초대되어 있는지 확인하세요.');
-    process.exit(1);
-  }
+/* ───────────── 슬래시 커맨드 정의 ───────────── */
+const commands = [
+  new SlashCommandBuilder().setName('패널').setDescription('자판기 패널을 이 채널에 올립니다 (서버 주인 전용)'),
+  new SlashCommandBuilder().setName('설정').setDescription('계좌 안내 / 이용가이드 문구 설정 (서버 주인 전용)'),
+  new SlashCommandBuilder().setName('상품추가').setDescription('상품 추가 (서버 주인 전용)')
+    .addStringOption((o) => o.setName('카테고리').setDescription('예: 계정, 쿠폰').setRequired(true))
+    .addStringOption((o) => o.setName('이름').setDescription('상품 이름').setRequired(true))
+    .addIntegerOption((o) => o.setName('가격').setDescription('가격(원)').setMinValue(0).setRequired(true)),
+  new SlashCommandBuilder().setName('재고추가').setDescription('상품 재고 추가 - 한 줄에 1개 (서버 주인 전용)')
+    .addIntegerOption((o) => o.setName('상품번호').setDescription('/상품목록 에서 확인').setRequired(true)),
+  new SlashCommandBuilder().setName('상품목록').setDescription('상품 번호/재고 확인 (서버 주인 전용)'),
+  new SlashCommandBuilder().setName('상품삭제').setDescription('상품 삭제 (서버 주인 전용)')
+    .addIntegerOption((o) => o.setName('상품번호').setDescription('삭제할 상품 번호').setRequired(true)),
+  new SlashCommandBuilder().setName('잔액지급').setDescription('유저 잔액 지급/차감 (서버 주인 전용)')
+    .addUserOption((o) => o.setName('유저').setDescription('대상').setRequired(true))
+    .addIntegerOption((o) => o.setName('금액').setDescription('차감은 음수').setRequired(true)),
+  new SlashCommandBuilder().setName('라이센스등록').setDescription('구매한 라이센스 키를 이 서버에 등록 (서버 주인 전용)')
+    .addStringOption((o) => o.setName('키').setDescription('라이센스 키').setRequired(true)),
+  new SlashCommandBuilder().setName('라이센스확인').setDescription('이 서버의 라이센스 만료일 확인'),
+  new SlashCommandBuilder().setName('라이센스생성').setDescription('라이센스 키 생성 (봇 판매자 전용)')
+    .addIntegerOption((o) => o.setName('기간').setDescription('이용 기간').setRequired(true)
+      .addChoices({ name: '1개월 (30일)', value: 30 }, { name: '2개월 (60일)', value: 60 }, { name: '3개월 (90일)', value: 90 }))
+    .addIntegerOption((o) => o.setName('개수').setDescription('생성 개수 (기본 1, 최대 20)').setMinValue(1).setMaxValue(20)),
+  new SlashCommandBuilder().setName('라이센스목록').setDescription('미사용 라이센스 목록 (봇 판매자 전용)'),
+].map((c) => c.toJSON());
+
+client.once('ready', async () => {
+  await client.application.commands.set(commands);
+  console.log(`✅ 로그인: ${client.user.tag}`);
+});
+
+/* ───────────── 유틸 ───────────── */
+const isMaster = (id) => id === MASTER_ID;
+const isOwner = (i) => i.user.id === i.guild.ownerId;
+const isLicensed = (guildId) => FREE_GUILDS.includes(guildId) || q.getGuild(guildId).expires_at > Date.now();
+
+function makeKey() {
+  const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
+  return `${LICENSE_PREFIX}-${part()}-${part()}-${part()}-${part()}`;
 }
-client.once('clientReady', () => console.log(`✅ ${client.user.tag} 로그인 완료`));
 
-function vendingPanel() {
-  const products = Object.values(db.products).slice(0, 25);
-  const embed = new EmbedBuilder().setTitle('🛒 자판기').setColor(0x5865f2)
-    .setDescription(products.length
-      ? products.map((p) => `**${p.name}** — ${won(p.price)} (재고 ${p.stock.length})`).join('\n')
-      : '등록된 상품이 없습니다.')
-    .setFooter({ text: '아래 메뉴에서 상품을 선택하세요. 할인은 구매 단계에서 자동 적용됩니다.' });
-  const rows = [];
-  if (products.length) {
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId('vend_select').setPlaceholder('상품을 선택하세요')
-        .addOptions(products.map((p) => ({
-          label: p.name.slice(0, 100), description: `${won(p.price)} / 재고 ${p.stock.length}`, value: p.id,
-        }))),
-    ));
-  }
-  return { embeds: [embed], components: rows };
-}
-
-/* ───────────── 구매 처리 ───────────── */
-async function purchase(interaction, productId) {
-  const product = db.products[productId];
-  if (!product) return interaction.editReply('존재하지 않는 상품입니다.');
-  if (!product.stock.length) return interaction.editReply('❌ 품절된 상품입니다.');
-
-  const user = getUser(interaction.user.id);
-  const pct = getDiscount(interaction.member);
-  const price = finalPrice(product.price, pct);
-  if (user.balance < price) {
-    return interaction.editReply(`❌ 포인트가 부족합니다. (필요 ${won(price)} / 보유 ${won(user.balance)})`);
-  }
-
-  // 결제 + 재고 차감 (여기까지 await 없음 → 동시 구매에도 안전)
-  const item = product.stock.shift();
-  user.balance -= price;
-  save();
-
-  // DM 발송, 실패 시 전액 환불 + 재고 복구
-  try {
-    await interaction.user.send({
-      embeds: [new EmbedBuilder().setTitle('📦 구매 상품 도착').setColor(0x57f287)
-        .addFields(
-          { name: '상품', value: product.name },
-          { name: '결제 금액', value: `${won(price)}${pct ? ` (${pct}% 할인)` : ''}` },
-          { name: '내용', value: `\`\`\`\n${item}\n\`\`\`` },
-        ).setTimestamp()],
-    });
-  } catch {
-    product.stock.unshift(item);
-    user.balance += price;
-    save();
-    return interaction.editReply('❌ DM 전송 실패! 서버 멤버의 DM 허용을 켠 뒤 다시 시도해주세요. (결제는 취소되었습니다)');
-  }
-
-  // 구매자 역할 지급
-  let roleMsg = '';
-  const roleId = db.settings.buyerRoleId;
-  if (roleId) {
-    try { await interaction.member.roles.add(roleId); roleMsg = '\n🏷️ 구매자 역할이 지급되었습니다.'; }
-    catch { roleMsg = '\n⚠️ 역할 지급 실패 (봇 권한/역할 순서를 확인하세요).'; }
-  }
-
-  return interaction.editReply(
-    `✅ **${product.name}** 구매 완료! DM을 확인하세요.\n결제 ${won(price)}${pct ? ` (${pct}% 할인)` : ''} / 남은 포인트 ${won(user.balance)}${roleMsg}`,
+function panelPayload(guild) {
+  const embed = new EmbedBuilder()
+    .setColor(0xff88cc)
+    .setTitle('💎💜 24시간 무인 자판기 💜💎')
+    .setDescription(
+      [
+        '━━━━━━━━━━━━━━━━━━━━━━',
+        '💗 **상품스토어** – 카테고리별 편리한 쇼핑 & 즉시 자동 지급',
+        '🤍 **잔액충전** – 계좌이체를 통한 간편 충전',
+        '🖤 **내정보** – 잔액, 이용 기록 확인',
+        '💗 **이용안내** – 자판기 이용 방법 및 가이드',
+        '━━━━━━━━━━━━━━━━━━━━━━',
+        '✨ 아래 버튼을 눌러 이용해 주세요. 모든 응답은 **나에게만** 안전하게 보여요 🔒',
+      ].join('\n'),
+    )
+    .setFooter({ text: `✦ ${BOT_NAME} ✦` })
+    .setTimestamp();
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('store').setLabel('제품스토어').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('charge').setLabel('잔액충전').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('myinfo').setLabel('내정보').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('guide').setLabel('이용가이드').setStyle(ButtonStyle.Secondary),
   );
+  return { embeds: [embed], components: [row] };
 }
 
-/* ───────────── 인터랙션 ───────────── */
+/* ───────────── 메인 핸들러 ───────────── */
 client.on('interactionCreate', async (i) => {
   try {
-    // 상품 자동완성
-    if (i.isAutocomplete()) {
-      const q = i.options.getFocused().toLowerCase();
-      return i.respond(Object.values(db.products)
-        .filter((p) => p.name.toLowerCase().includes(q)).slice(0, 25)
-        .map((p) => ({ name: `${p.name} (${won(p.price)})`, value: p.id })));
+    // 서버 주인 DM에서 누르는 충전 승인/거절 버튼 (DM이라 guild 없음)
+    if (i.isButton() && /^chg_(ok|no):/.test(i.customId)) return await handleChargeDecision(i);
+
+    if (!i.guild) return;
+
+    // 라이센스 관련 명령은 라이센스 없어도 사용 가능
+    if (i.isChatInputCommand() && ['라이센스등록', '라이센스확인', '라이센스생성', '라이센스목록'].includes(i.commandName)) {
+      return await handleLicenseCmd(i);
     }
 
-    // 자판기 상품 선택 → 가격 안내 + 구매 버튼
-    if (i.isStringSelectMenu() && i.customId === 'vend_select') {
-      const p = db.products[i.values[0]];
-      if (!p) return i.reply({ content: '존재하지 않는 상품입니다.', flags: EPH });
-      const pct = getDiscount(i.member);
-      const price = finalPrice(p.price, pct);
-      return i.reply({
-        flags: EPH,
-        embeds: [new EmbedBuilder().setTitle(p.name).setColor(0xfee75c).addFields(
-          { name: '정가', value: won(p.price), inline: true },
-          { name: '할인', value: `${pct}%`, inline: true },
-          { name: '결제 금액', value: won(price), inline: true },
-          { name: '내 포인트', value: won(getUser(i.user.id).balance), inline: true },
-          { name: '재고', value: `${p.stock.length}개`, inline: true },
-        )],
-        components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`buy:${p.id}`).setLabel('구매하기').setStyle(ButtonStyle.Success))],
+    // 라이센스 만료 시 전체 기능 잠금
+    if (!isLicensed(i.guildId)) {
+      return await i.reply({
+        content: '⛔ 이 서버의 자판기 라이센스가 만료되었거나 등록되지 않았어요.\n서버 주인이 `/라이센스등록` 으로 키를 등록해 주세요.',
+        ...EPH,
       });
     }
 
-    // 충전 승인/거절 버튼 (관리자 전용)
-    if (i.isButton() && /^charge_(ok|no):/.test(i.customId)) {
-      if (!i.memberPermissions.has(PermissionFlagsBits.Administrator)) {
-        return i.reply({ content: '관리자만 처리할 수 있습니다.', flags: EPH });
-      }
-      const [act, id] = i.customId.split(':');
-      const c = db.charges[id];
-      if (!c || c.status !== 'pending') return i.reply({ content: '이미 처리되었거나 없는 요청입니다.', flags: EPH });
-      const ok = act === 'charge_ok';
-      c.status = ok ? 'approved' : 'rejected';
-      c.handledBy = i.user.id;
-      if (ok) getUser(c.userId).balance += c.amount;
-      save();
-      const embed = EmbedBuilder.from(i.message.embeds[0]).setColor(ok ? 0x57f287 : 0xed4245)
-        .setTitle(`${ok ? '✅ 승인' : '❌ 거절'} - 충전 요청 #${id}`)
-        .setFooter({ text: `처리자: ${i.user.tag}` });
-      await i.update({ embeds: [embed], components: [] });
-      const target = await client.users.fetch(c.userId).catch(() => null);
-      target?.send(ok
-        ? `✅ ${won(c.amount)} 충전이 완료되었습니다! 현재 포인트: ${won(getUser(c.userId).balance)}`
-        : '❌ 충전 요청이 거절되었습니다. 이체 화면과 디스코드 화면이 한 화면에 함께 보이는 이중창 캡처로 다시 신청해주세요.').catch(() => {});
-      return;
-    }
-
-    // 구매 버튼
-    if (i.isButton() && i.customId.startsWith('buy:')) {
-      await i.deferReply({ flags: EPH });
-      return purchase(i, i.customId.split(':')[1]);
-    }
-
-    // 재고 입력 모달 제출
-    if (i.isModalSubmit() && i.customId.startsWith('stock:')) {
-      const p = db.products[i.customId.split(':')[1]];
-      if (!p) return i.reply({ content: '존재하지 않는 상품입니다.', flags: EPH });
-      const lines = i.fields.getTextInputValue('items').split('\n').map((s) => s.trim()).filter(Boolean);
-      p.stock.push(...lines);
-      save();
-      return i.reply({ content: `✅ **${p.name}** 재고 ${lines.length}개 추가 (현재 ${p.stock.length}개)`, flags: EPH });
-    }
-
-    if (!i.isChatInputCommand()) return;
-    const n = i.commandName;
-
-    if (n === '상품추가') {
-      const id = String(db.nextId++);
-      db.products[id] = { id, name: i.options.getString('이름'), price: i.options.getInteger('가격'), stock: [] };
-      save();
-      return i.reply({ content: `✅ 상품 등록: **${db.products[id].name}** (${won(db.products[id].price)})\n\`/재고추가\`로 재고를 넣어주세요.`, flags: EPH });
-    }
-    if (n === '상품삭제') {
-      const p = db.products[i.options.getString('상품')];
-      if (!p) return i.reply({ content: '존재하지 않는 상품입니다.', flags: EPH });
-      delete db.products[p.id]; save();
-      return i.reply({ content: `🗑️ **${p.name}** 삭제 완료`, flags: EPH });
-    }
-    if (n === '재고추가') {
-      const p = db.products[i.options.getString('상품')];
-      if (!p) return i.reply({ content: '존재하지 않는 상품입니다.', flags: EPH });
-      return i.showModal(new ModalBuilder().setCustomId(`stock:${p.id}`).setTitle(`${p.name} 재고 추가`.slice(0, 45))
-        .addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('items').setLabel('한 줄에 상품 1개씩 입력')
-            .setStyle(TextInputStyle.Paragraph).setRequired(true))));
-    }
-    if (n === '상품목록') {
-      const list = Object.values(db.products).map((p) => `\`${p.id}\` **${p.name}** ${won(p.price)} / 재고 ${p.stock.length}`).join('\n') || '상품 없음';
-      return i.reply({ content: list, flags: EPH });
-    }
-    if (n === '자판기설치') {
-      await i.channel.send(vendingPanel());
-      return i.reply({ content: '✅ 자판기를 설치했습니다. (상품/재고가 바뀌면 다시 설치하세요)', flags: EPH });
-    }
-    if (n === '전체할인') {
-      db.settings.globalDiscount = i.options.getInteger('퍼센트'); save();
-      return i.reply({ content: `🏷️ 전체 할인: **${db.settings.globalDiscount}%**`, flags: EPH });
-    }
-    if (n === '역할할인') {
-      const role = i.options.getRole('역할'); const pct = i.options.getInteger('퍼센트');
-      if (pct === 0) delete db.settings.roleDiscounts[role.id]; else db.settings.roleDiscounts[role.id] = pct;
-      save();
-      return i.reply({ content: pct ? `🏷️ ${role} 역할 할인 **${pct}%** 설정` : `🏷️ ${role} 역할 할인 해제`, flags: EPH });
-    }
-    if (n === '구매자역할') {
-      const role = i.options.getRole('역할'); db.settings.buyerRoleId = role.id; save();
-      return i.reply({ content: `✅ 구매 시 ${role} 역할이 지급됩니다. (봇 역할이 이 역할보다 위에 있어야 합니다)`, flags: EPH });
-    }
-    if (n === '잔액지급') {
-      const u = i.options.getUser('유저'); const amt = i.options.getInteger('금액');
-      const data = getUser(u.id); data.balance = Math.max(0, data.balance + amt); save();
-      return i.reply({ content: `✅ ${u} 잔액: ${won(data.balance)} (${amt >= 0 ? '+' : ''}${amt})`, flags: EPH });
-    }
-    if (n === '계좌설정') {
-      db.settings.bank = { bank: i.options.getString('은행'), number: i.options.getString('계좌번호'), holder: i.options.getString('예금주') };
-      save();
-      return i.reply({ content: '✅ 입금 계좌 설정 완료', flags: EPH });
-    }
-    if (n === '충전채널') {
-      const ch = i.options.getChannel('채널'); db.settings.chargeChannelId = ch.id; save();
-      return i.reply({ content: `✅ 충전 요청이 ${ch} 에 올라옵니다. (관리자만 볼 수 있는 채널로 지정하세요)`, flags: EPH });
-    }
-    if (n === '충전안내') {
-      const b = db.settings.bank;
-      if (!b) return i.reply({ content: '충전 계좌가 아직 설정되지 않았습니다. 관리자에게 문의하세요.', flags: EPH });
-      return i.reply({
-        flags: EPH,
-        embeds: [new EmbedBuilder().setTitle('💳 계좌 충전 안내').setColor(0x5865f2).addFields(
-          { name: '입금 계좌', value: `${b.bank} ${b.number} (예금주 ${b.holder})` },
-          { name: '충전 비율', value: '1원 = 1P (최소 1,000원)' },
-          { name: '이중창 인증 방법', value: '1. 계좌로 입금(이체)합니다.\n2. 폰에서 화면 분할(멀티윈도우)로 **은행 이체 완료 화면**과 **디스코드 화면**을 한 화면에 같이 띄웁니다.\n3. 그 상태로 캡처한 뒤 `/충전신청`에 금액·입금자명·사진을 첨부합니다.\n4. 관리자가 확인하면 포인트가 지급되고 DM으로 알려드립니다.' },
-          { name: '주의', value: '입금자명/금액이 사진과 일치해야 합니다. 비밀번호·보안카드 번호 등 민감 정보는 가리고 올려주세요.' },
-        )],
-      });
-    }
-    if (n === '충전신청') {
-      const s = db.settings;
-      if (!s.bank || !s.chargeChannelId) return i.reply({ content: '충전 기능이 아직 설정되지 않았습니다. 관리자에게 문의하세요.', flags: EPH });
-      const amount = i.options.getInteger('금액');
-      const depositor = i.options.getString('입금자명');
-      const file = i.options.getAttachment('인증사진');
-      if (!file.contentType?.startsWith('image/')) return i.reply({ content: '이미지 파일만 첨부할 수 있습니다.', flags: EPH });
-      const pending = Object.values(db.charges).filter((c) => c.userId === i.user.id && c.status === 'pending').length;
-      if (pending >= 3) return i.reply({ content: '처리 대기 중인 충전 요청이 너무 많습니다. 처리 후 다시 신청해주세요.', flags: EPH });
-
-      await i.deferReply({ flags: EPH });
-      const ch = await client.channels.fetch(s.chargeChannelId).catch(() => null);
-      if (!ch) return i.editReply('관리자 확인 채널을 찾을 수 없습니다. 관리자에게 문의하세요.');
-      const id = String(db.nextChargeId);
-      const msg = await ch.send({
-        embeds: [new EmbedBuilder().setTitle(`💳 충전 요청 #${id}`).setColor(0xfee75c)
-          .addFields(
-            { name: '신청자', value: `${i.user} (${i.user.tag})`, inline: true },
-            { name: '금액', value: `${amount.toLocaleString()}원`, inline: true },
-            { name: '입금자명', value: depositor, inline: true },
-          ).setImage(file.url).setTimestamp()],
-        components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`charge_ok:${id}`).setLabel('승인').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`charge_no:${id}`).setLabel('거절').setStyle(ButtonStyle.Danger))],
-      }).catch(() => null);
-      if (!msg) return i.editReply('관리자 채널에 요청을 보내지 못했습니다. 봇의 채널 권한을 확인해주세요.');
-      db.charges[id] = { id, userId: i.user.id, amount, depositor, imageUrl: file.url, status: 'pending', handledBy: null };
-      db.nextChargeId++;
-      save();
-      return i.editReply(`✅ 충전 요청 #${id}이 접수되었습니다. 관리자 확인 후 ${amount.toLocaleString()}P가 지급되며 DM으로 알려드립니다.`);
-    }
-    if (n === '잔액') {
-      return i.reply({ content: `💰 보유 포인트: **${won(getUser(i.user.id).balance)}**`, flags: EPH });
-    }
-    if (n === '출근') {
-      const u = getUser(i.user.id);
-      if (u.checkInAt) return i.reply({ content: '이미 출근 상태입니다. `/퇴근`을 먼저 해주세요.', flags: EPH });
-      const now = Date.now();
-      u.discordId = i.user.id;
-      u.checkInAt = now;
-      u.lastCheckInAt = now;
-      save();
-      return i.reply({ embeds: [attendanceEmbed(u, i.user.username, 'checkin', now)] });
-    }
-    if (n === '퇴근') {
-      const u = getUser(i.user.id);
-      if (!u.checkInAt) return i.reply({ content: '출근 상태가 아닙니다. `/출근`을 먼저 해주세요.', flags: EPH });
-      const now = Date.now();
-      const elapsedMs = Math.max(0, now - u.checkInAt);
-      u.lastCheckInAt = u.checkInAt;
-      u.lastCheckOutAt = now;
-      u.lastShiftMs = elapsedMs;
-      u.totalMinutes = (u.totalMinutes || 0) + Math.floor(elapsedMs / 60000);
-      u.checkInAt = null;
-      u.discordId = i.user.id;
-      save();
-      return i.reply({ embeds: [attendanceEmbed(u, i.user.username, 'checkout', now)] });
-    }
+    if (i.isChatInputCommand()) return await handleCommand(i);
+    if (i.isButton()) return await handleButton(i);
+    if (i.isStringSelectMenu()) return await handleSelect(i);
+    if (i.isModalSubmit()) return await handleModal(i);
   } catch (e) {
     console.error(e);
-    const msg = { content: '⚠️ 오류가 발생했습니다.', flags: EPH };
-    if (i.deferred || i.replied) i.followUp(msg).catch(() => {}); else i.reply(msg).catch(() => {});
+    const msg = { content: '⚠️ 처리 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.', ...EPH };
+    if (i.deferred || i.replied) i.followUp(msg).catch(() => {});
+    else i.reply(msg).catch(() => {});
   }
 });
 
-registerCommands().then(() => client.login(TOKEN));
+/* ───────────── 슬래시 커맨드 (서버 주인용) ───────────── */
+async function handleCommand(i) {
+  if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인만 사용할 수 있는 명령어예요.', ...EPH });
+  const gid = i.guildId;
+
+  switch (i.commandName) {
+    case '패널': {
+      await i.channel.send(panelPayload(i.guild));
+      return i.reply({ content: '✅ 패널을 올렸어요.', ...EPH });
+    }
+    case '설정': {
+      const g = q.getGuild(gid);
+      const modal = new ModalBuilder().setCustomId('settings').setTitle('자판기 설정').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('bank').setLabel('입금 계좌 안내 (충전 신청 후 표시)')
+            .setStyle(TextInputStyle.Paragraph).setValue(g.bank_info || '').setRequired(true)
+            .setPlaceholder('예: 카카오뱅크 3333-00-0000000 홍길동'),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('guide').setLabel('이용가이드 문구')
+            .setStyle(TextInputStyle.Paragraph).setValue(g.guide || '').setRequired(false),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('min').setLabel('최소 충전 금액(원)')
+            .setStyle(TextInputStyle.Short).setValue(String(g.min_charge)).setRequired(true),
+        ),
+      );
+      return i.showModal(modal);
+    }
+    case '상품추가': {
+      const info = db.prepare('INSERT INTO products (guild_id, category, name, price) VALUES (?,?,?,?)')
+        .run(gid, i.options.getString('카테고리').slice(0, 20), i.options.getString('이름').slice(0, 60), i.options.getInteger('가격'));
+      return i.reply({ content: `✅ 상품 추가 완료 (번호 **${info.lastInsertRowid}**)\n\`/재고추가 ${info.lastInsertRowid}\` 로 재고를 넣어 주세요.`, ...EPH });
+    }
+    case '재고추가': {
+      const pid = i.options.getInteger('상품번호');
+      const p = db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(pid, gid);
+      if (!p) return i.reply({ content: '❌ 없는 상품 번호예요.', ...EPH });
+      const modal = new ModalBuilder().setCustomId(`stock:${pid}`).setTitle(`재고 추가 - ${p.name}`.slice(0, 45)).addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('lines').setLabel('한 줄에 재고 1개').setStyle(TextInputStyle.Paragraph).setRequired(true),
+        ),
+      );
+      return i.showModal(modal);
+    }
+    case '상품목록': {
+      const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
+                               FROM products p WHERE guild_id = ? ORDER BY id`).all(gid);
+      const text = rows.length
+        ? rows.map((r) => `**#${r.id}** [${r.category}] ${r.name} — ${won(r.price)} (재고 ${r.cnt})`).join('\n')
+        : '등록된 상품이 없어요. `/상품추가` 로 만들어 주세요.';
+      return i.reply({ content: text.slice(0, 1900), ...EPH });
+    }
+    case '상품삭제': {
+      const pid = i.options.getInteger('상품번호');
+      const r = db.prepare('DELETE FROM products WHERE id = ? AND guild_id = ?').run(pid, gid);
+      if (r.changes) db.prepare('DELETE FROM stock WHERE product_id = ?').run(pid);
+      return i.reply({ content: r.changes ? '🗑️ 삭제했어요.' : '❌ 없는 상품 번호예요.', ...EPH });
+    }
+    case '잔액지급': {
+      const user = i.options.getUser('유저');
+      const amt = i.options.getInteger('금액');
+      q.getUser(gid, user.id);
+      db.prepare('UPDATE users SET balance = MAX(0, balance + ?) WHERE guild_id = ? AND user_id = ?').run(amt, gid, user.id);
+      const u = q.getUser(gid, user.id);
+      return i.reply({ content: `✅ ${user} 잔액: **${won(u.balance)}**`, ...EPH });
+    }
+  }
+}
+
+/* ───────────── 버튼 ───────────── */
+async function handleButton(i) {
+  const gid = i.guildId;
+
+  if (i.customId === 'store') {
+    const cats = db.prepare(`SELECT p.category, COUNT(*) AS n,
+                               SUM((SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0)) AS cnt
+                             FROM products p WHERE guild_id = ? GROUP BY p.category ORDER BY p.category LIMIT 25`).all(gid);
+    if (!cats.length) return i.reply({ content: '😢 아직 등록된 상품이 없어요.', ...EPH });
+    const menu = new StringSelectMenuBuilder().setCustomId('cat').setPlaceholder('카테고리를 선택하세요').addOptions(
+      cats.map((c) => ({
+        label: c.category.slice(0, 100),
+        description: `상품 ${c.n}종 · 재고 ${c.cnt}개`,
+        value: c.category,
+      })),
+    );
+    return i.reply({ content: '🛒 **제품스토어** — 카테고리를 먼저 골라 주세요.', components: [new ActionRowBuilder().addComponents(menu)], ...EPH });
+  }
+
+  if (i.customId === 'charge') {
+    const g = q.getGuild(gid);
+    const modal = new ModalBuilder().setCustomId('charge_form').setTitle('잔액 충전 신청').addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('depositor').setLabel('입금자명').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('amount').setLabel(`충전 금액 (최소 ${g.min_charge}원)`).setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('숫자만 입력 예: 10000'),
+      ),
+    );
+    return i.showModal(modal);
+  }
+
+  if (i.customId === 'myinfo') {
+    const u = q.getUser(gid, i.user.id);
+    const recent = db.prepare('SELECT * FROM purchases WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 5').all(gid, i.user.id);
+    const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle('🖤 내정보')
+      .addFields(
+        { name: '보유 잔액', value: won(u.balance), inline: true },
+        { name: '누적 사용', value: won(u.total_spent), inline: true },
+        { name: '최근 구매 5건', value: recent.length ? recent.map((r) => `• ${r.product_name} — ${won(r.price)} (${ts(r.created_at)})`).join('\n') : '구매 내역이 없어요.' },
+      );
+    return i.reply({ embeds: [embed], ...EPH });
+  }
+
+  if (i.customId === 'guide') {
+    const g = q.getGuild(gid);
+    const text = g.guide || '1. **잔액충전** 으로 충전 신청\n2. 서버 주인이 입금 확인 후 승인\n3. **제품스토어** 에서 상품 선택 → 구매\n4. 상품은 즉시 자동 지급돼요.';
+    return i.reply({ embeds: [new EmbedBuilder().setColor(0xff88cc).setTitle('💗 이용가이드').setDescription(text)], ...EPH });
+  }
+
+  // 구매 확정 버튼
+  if (i.customId.startsWith('buy:')) {
+    const res = buy(gid, i.user.id, Number(i.customId.split(':')[1]));
+    if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });
+    await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
+    i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
+    return;
+  }
+  if (i.customId === 'buy_cancel') return i.update({ content: '구매를 취소했어요.', components: [] });
+}
+
+/* ───────────── 셀렉트 메뉴 ───────────── */
+async function handleSelect(i) {
+  // 1단계: 카테고리 선택 → 해당 카테고리 상품 목록
+  if (i.customId === 'cat') {
+    const category = i.values[0];
+    const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
+                             FROM products p WHERE guild_id = ? AND category = ? ORDER BY id LIMIT 25`).all(i.guildId, category);
+    if (!rows.length) return i.update({ content: '😢 이 카테고리에 상품이 없어요.', components: [] });
+    const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder('구매할 상품을 선택하세요').addOptions(
+      rows.map((r) => ({
+        label: r.name.slice(0, 100),
+        description: `${won(r.price)} · ${r.cnt > 0 ? `재고 ${r.cnt}개` : '품절'}`,
+        value: String(r.id),
+      })),
+    );
+    return i.update({ content: `🛒 **${category}** — 상품을 선택해 주세요.`, components: [new ActionRowBuilder().addComponents(menu)] });
+  }
+
+  // 2단계: 상품 선택 → 구매 확인
+  if (i.customId !== 'pick') return;
+  const p = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
+                        FROM products p WHERE id = ? AND guild_id = ?`).get(Number(i.values[0]), i.guildId);
+  if (!p) return i.update({ content: '❌ 없는 상품이에요.', components: [] });
+  const u = q.getUser(i.guildId, i.user.id);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`buy:${p.id}`).setLabel('구매하기').setStyle(ButtonStyle.Success).setDisabled(p.cnt === 0),
+    new ButtonBuilder().setCustomId('buy_cancel').setLabel('취소').setStyle(ButtonStyle.Secondary),
+  );
+  return i.update({
+    content: `**${p.name}** [${p.category}]\n가격: ${won(p.price)} · 재고: ${p.cnt > 0 ? `${p.cnt}개` : '품절'}\n내 잔액: ${won(u.balance)}`,
+    components: [row],
+  });
+}
+
+/* ───────────── 모달 ───────────── */
+async function handleModal(i) {
+  const gid = i.guildId;
+
+  if (i.customId === 'settings') {
+    if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인 전용이에요.', ...EPH });
+    const min = Math.max(0, parseInt(i.fields.getTextInputValue('min').replace(/\D/g, ''), 10) || 1000);
+    q.getGuild(gid);
+    db.prepare('UPDATE guilds SET bank_info = ?, guide = ?, min_charge = ? WHERE guild_id = ?')
+      .run(i.fields.getTextInputValue('bank'), i.fields.getTextInputValue('guide'), min, gid);
+    return i.reply({ content: '✅ 설정을 저장했어요.', ...EPH });
+  }
+
+  if (i.customId.startsWith('stock:')) {
+    if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인 전용이에요.', ...EPH });
+    const pid = Number(i.customId.split(':')[1]);
+    const lines = i.fields.getTextInputValue('lines').split('\n').map((s) => s.trim()).filter(Boolean);
+    const ins = db.prepare('INSERT INTO stock (product_id, content) VALUES (?, ?)');
+    db.transaction(() => lines.forEach((l) => ins.run(pid, l)))();
+    return i.reply({ content: `✅ 재고 **${lines.length}개** 추가했어요.`, ...EPH });
+  }
+
+  if (i.customId === 'charge_form') {
+    const g = q.getGuild(gid);
+    const amount = parseInt(i.fields.getTextInputValue('amount').replace(/\D/g, ''), 10);
+    const depositor = i.fields.getTextInputValue('depositor').trim();
+    if (!amount || amount < g.min_charge) return i.reply({ content: `❌ 최소 충전 금액은 ${won(g.min_charge)} 이에요.`, ...EPH });
+
+    const pending = db.prepare("SELECT COUNT(*) AS c FROM charges WHERE guild_id = ? AND user_id = ? AND status = 'pending'").get(gid, i.user.id).c;
+    if (pending >= 3) return i.reply({ content: '❌ 처리 대기 중인 충전 신청이 너무 많아요. 승인 후 다시 신청해 주세요.', ...EPH });
+
+    const info = db.prepare('INSERT INTO charges (guild_id, user_id, amount, depositor, created_at) VALUES (?,?,?,?,?)')
+      .run(gid, i.user.id, amount, depositor, Date.now());
+    const chargeId = Number(info.lastInsertRowid);
+
+    // 충전 신청은 "서버 주인" 에게만 DM 전송
+    const embed = new EmbedBuilder().setColor(0xffcc4d).setTitle('💰 충전 신청이 도착했어요')
+      .addFields(
+        { name: '서버', value: i.guild.name, inline: true },
+        { name: '신청자', value: `${i.user} (${i.user.tag})`, inline: true },
+        { name: '입금자명', value: depositor, inline: true },
+        { name: '금액', value: won(amount), inline: true },
+        { name: '신청번호', value: `#${chargeId}`, inline: true },
+      ).setTimestamp();
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`chg_ok:${chargeId}`).setLabel('승인').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`chg_no:${chargeId}`).setLabel('거절').setStyle(ButtonStyle.Danger),
+    );
+    try {
+      const owner = await i.guild.fetchOwner();
+      await owner.send({ embeds: [embed], components: [row] });
+    } catch {
+      db.prepare('DELETE FROM charges WHERE id = ?').run(chargeId);
+      return i.reply({ content: '❌ 서버 주인에게 알림을 보내지 못했어요. (주인의 DM 수신이 꺼져 있을 수 있어요)', ...EPH });
+    }
+
+    return i.reply({
+      content: `✅ 충전 신청 완료! (#${chargeId})\n\n**입금 계좌**\n${g.bank_info || '서버 주인에게 문의해 주세요.'}\n\n입금자명 **${depositor}** / 금액 **${won(amount)}** 로 입금해 주세요.\n서버 주인이 확인하면 잔액이 자동 반영돼요.`,
+      ...EPH,
+    });
+  }
+}
+
+/* ───────────── 충전 승인/거절 (서버 주인 DM) ───────────── */
+async function handleChargeDecision(i) {
+  const [action, idStr] = i.customId.split(':');
+  const chargeId = Number(idStr);
+  const c = db.prepare('SELECT * FROM charges WHERE id = ?').get(chargeId);
+  if (!c) return i.reply({ content: '❌ 신청 내역을 찾을 수 없어요.', ...EPH });
+
+  const guild = await client.guilds.fetch(c.guild_id).catch(() => null);
+  if (!guild || guild.ownerId !== i.user.id) return i.reply({ content: '🚫 서버 주인만 처리할 수 있어요.', ...EPH });
+  if (c.status !== 'pending') return i.reply({ content: '이미 처리된 신청이에요.', ...EPH });
+
+  const approve = action === 'chg_ok';
+  const done = approve ? approveCharge(chargeId) : rejectCharge(chargeId);
+  if (!done) return i.reply({ content: '이미 처리된 신청이에요.', ...EPH });
+
+  const base = EmbedBuilder.from(i.message.embeds[0]).setColor(approve ? 0x57f287 : 0xed4245)
+    .addFields({ name: '처리 결과', value: approve ? '✅ 승인됨' : '❌ 거절됨' });
+  await i.update({ embeds: [base], components: [] });
+
+  const bal = q.getUser(c.guild_id, c.user_id).balance;
+  client.users.send(c.user_id, approve
+    ? `✅ [${guild.name}] 충전 **${won(c.amount)}** 이 승인됐어요! 현재 잔액 ${won(bal)}`
+    : `❌ [${guild.name}] 충전 신청(#${c.id}, ${won(c.amount)})이 거절됐어요. 문의는 서버 주인에게 해주세요.`).catch(() => {});
+}
+
+/* ───────────── 라이센스 ───────────── */
+async function handleLicenseCmd(i) {
+  switch (i.commandName) {
+    case '라이센스생성': {
+      if (!isMaster(i.user.id)) return i.reply({ content: '🚫 봇 판매자만 사용할 수 있어요.', ...EPH });
+      const days = i.options.getInteger('기간');
+      const n = i.options.getInteger('개수') || 1;
+      const ins = db.prepare('INSERT INTO licenses (key, days, created_at) VALUES (?,?,?)');
+      const keys = [];
+      db.transaction(() => { for (let k = 0; k < n; k++) { const key = makeKey(); ins.run(key, days, Date.now()); keys.push(key); } })();
+      return i.reply({ content: `🔑 **${days}일** 라이센스 ${n}개 생성\n\`\`\`\n${keys.join('\n')}\n\`\`\``, ...EPH });
+    }
+    case '라이센스목록': {
+      if (!isMaster(i.user.id)) return i.reply({ content: '🚫 봇 판매자만 사용할 수 있어요.', ...EPH });
+      const rows = db.prepare('SELECT * FROM licenses WHERE used_guild IS NULL ORDER BY created_at DESC LIMIT 30').all();
+      return i.reply({ content: rows.length ? `미사용 라이센스 (최근 30개)\n\`\`\`\n${rows.map((r) => `${r.key}  ${r.days}일`).join('\n')}\n\`\`\`` : '미사용 라이센스가 없어요.', ...EPH });
+    }
+    case '라이센스등록': {
+      if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인만 등록할 수 있어요.', ...EPH });
+      const res = redeemLicense(i.options.getString('키').trim().toUpperCase(), i.guildId);
+      if (res.err) return i.reply({ content: `❌ ${res.err}`, ...EPH });
+      return i.reply({ content: `✅ **${res.days}일** 라이센스 등록 완료!\n만료일: ${ts(res.expires)}`, ...EPH });
+    }
+    case '라이센스확인': {
+      if (FREE_GUILDS.includes(i.guildId)) return i.reply({ content: '♾️ 이 서버는 무제한 이용 서버예요.', ...EPH });
+      const g = q.getGuild(i.guildId);
+      return i.reply({ content: g.expires_at > Date.now() ? `✅ 이용 가능 — 만료일 ${ts(g.expires_at)}` : '⛔ 라이센스가 없거나 만료되었어요.', ...EPH });
+    }
+  }
+}
+
+client.login(TOKEN);
