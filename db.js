@@ -63,6 +63,14 @@ CREATE TABLE IF NOT EXISTS charges (
   status     TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS attendance (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id  TEXT NOT NULL,
+  user_id   TEXT NOT NULL,
+  clock_in  INTEGER NOT NULL,
+  clock_out INTEGER
+);
 `);
 
 const q = {
