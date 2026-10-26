@@ -193,7 +193,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
             content: '✍️ 구매 후 구매자 DM으로 안내할 **후기 채널**을 골라 주세요.',
             components: [
               row(new ChannelSelectMenuBuilder().setCustomId('adm_s_review').setPlaceholder('채널 선택')
-                .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum)),
+                .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
               row(btn('adm_reviewclear', '후기 DM 끄기', '🔕')),
             ],
             ...EPH,

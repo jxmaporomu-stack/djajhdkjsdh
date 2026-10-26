@@ -106,6 +106,10 @@ client.on('interactionCreate', async (i) => {
     // 서버 주인 DM에서 누르는 충전 승인/거절 버튼 (DM이라 guild 없음)
     if (i.isButton() && /^chg_(ok|no):/.test(i.customId)) return await handleChargeDecision(i);
 
+    // 후기 작성은 구매자 DM에서 진행되므로 guild 검사보다 먼저 처리
+    if (i.isButton() && i.customId.startsWith('rv:')) return await reviewButton(i);
+    if (i.isModalSubmit() && i.customId.startsWith('rvm:')) return await reviewSubmit(i);
+
     if (!i.guild) return;
 
     // 라이센스 관련 명령은 라이센스 없어도 사용 가능
@@ -308,14 +312,86 @@ async function afterPurchase(i, res) {
 
   // 3) 구매자 DM으로 후기 작성 안내
   if (g.review_channel) {
-    const url = `https://discord.com/channels/${i.guildId}/${g.review_channel}`;
     const dm = new EmbedBuilder().setColor(0xff88cc).setTitle('💌 구매해 주셔서 감사해요!')
-      .setDescription(`**${i.guild.name}** 에서 **${res.product.name}** 을(를) 구매하셨어요.\n구매 후기를 <#${g.review_channel}> 채널에 남겨 주시면 큰 힘이 돼요 🙏`);
+      .setDescription(`**${i.guild.name}** 에서 **${res.product.name}** 을(를) 구매하셨어요.\n아래 버튼으로 별점과 후기를 남겨 주시면 후기 채널에 등록돼요 🙏`);
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setLabel('후기 남기러 가기').setStyle(ButtonStyle.Link).setURL(url),
+      new ButtonBuilder().setCustomId(`rv:${res.purchaseId}`).setLabel('후기 작성하기').setEmoji('✍️').setStyle(ButtonStyle.Primary),
     );
     await i.user.send({ embeds: [dm], components: [row] }).catch(() => {});
   }
+}
+
+/* ───────────── 후기 (구매자 DM 버튼 → 모달 → 후기 채널) ───────────── */
+async function reviewButton(i) {
+  const pid = Number(i.customId.split(':')[1]);
+  const pur = db.prepare('SELECT * FROM purchases WHERE id = ?').get(pid);
+  if (!pur || pur.user_id !== i.user.id) return i.reply({ content: '🚫 본인이 구매한 상품만 후기를 쓸 수 있어요.', ...EPH });
+  if (db.prepare('SELECT 1 FROM reviews WHERE purchase_id = ?').get(pid)) {
+    return i.reply({ content: '이미 후기를 작성했어요. 감사합니다! 💖', ...EPH });
+  }
+  const modal = new ModalBuilder().setCustomId(`rvm:${pid}`).setTitle('구매 후기 작성').addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('stars').setLabel('별점 (1~5 숫자)').setStyle(TextInputStyle.Short)
+        .setRequired(true).setMinLength(1).setMaxLength(1).setPlaceholder('5'),
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('text').setLabel('이용 후기 내용').setStyle(TextInputStyle.Paragraph)
+        .setRequired(true).setMinLength(5).setMaxLength(800).setPlaceholder('이용 후기를 자유롭게 남겨 주세요.'),
+    ),
+  );
+  return i.showModal(modal);
+}
+
+async function reviewSubmit(i) {
+  const pid = Number(i.customId.split(':')[1]);
+  const pur = db.prepare('SELECT * FROM purchases WHERE id = ?').get(pid);
+  if (!pur || pur.user_id !== i.user.id) return i.reply({ content: '🚫 본인이 구매한 상품만 후기를 쓸 수 있어요.', ...EPH });
+
+  const rating = parseInt(i.fields.getTextInputValue('stars'), 10);
+  if (!(rating >= 1 && rating <= 5)) return i.reply({ content: '❌ 별점은 1~5 사이 숫자로 입력해 주세요. 버튼을 다시 눌러 작성해 주세요.', ...EPH });
+  const text = i.fields.getTextInputValue('text').trim();
+
+  const g = q.getGuild(pur.guild_id);
+  if (!g.review_channel) return i.reply({ content: '❌ 현재 후기 접수가 닫혀 있어요.', ...EPH });
+  const guild = await client.guilds.fetch(pur.guild_id).catch(() => null);
+  const ch = guild && await guild.channels.fetch(g.review_channel).catch(() => null);
+  if (!ch || !ch.isTextBased()) return i.reply({ content: '❌ 후기 채널을 찾을 수 없어요. 서버 주인에게 문의해 주세요.', ...EPH });
+
+  // 구매 1건당 후기 1개 (UNIQUE 제약으로 중복 방지)
+  try {
+    db.prepare('INSERT INTO reviews (purchase_id, guild_id, user_id, rating, content, created_at) VALUES (?,?,?,?,?,?)')
+      .run(pid, pur.guild_id, i.user.id, rating, text, Date.now());
+  } catch {
+    return i.reply({ content: '이미 후기를 작성했어요. 감사합니다! 💖', ...EPH });
+  }
+
+  const quote = text.split('\n').map((l) => `> ${l}`).join('\n');
+  const line = '═'.repeat(28);
+  const embed = new EmbedBuilder().setColor(0xff88cc)
+    .setTitle('💌 새로운 상품 구매 리뷰')
+    .setDescription([
+      '💎🩷🤍🖤',
+      line,
+      `• **작성자:** ${i.user} (\`${i.user.id}\`)`,
+      `• **구매 상품:** \`${pur.product_name}\``,
+      `• **별점 평가:** ${'⭐'.repeat(rating)} (\`${rating}점\`)`,
+      '',
+      '💬 **이용 후기 내용:**',
+      quote,
+      line,
+      '💎🩷🤍🖤',
+    ].join('\n'))
+    .setFooter({ text: g.footer_text || `✦ ${BOT_NAME} ✦` }).setTimestamp();
+
+  try {
+    await ch.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  } catch {
+    db.prepare('DELETE FROM reviews WHERE purchase_id = ?').run(pid);
+    return i.reply({ content: '❌ 후기 채널에 등록하지 못했어요. 서버 주인에게 문의해 주세요.', ...EPH });
+  }
+
+  const done = { content: '💖 후기가 등록되었어요. 소중한 후기 감사합니다!', embeds: [], components: [] };
+  return i.isFromMessage() ? i.update(done) : i.reply(done);
 }
 
 /* ───────────── 출퇴근 ───────────── */

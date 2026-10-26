@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS charges (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS reviews (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  purchase_id INTEGER NOT NULL UNIQUE,
+  guild_id    TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  rating      INTEGER NOT NULL,
+  content     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS attendance (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id  TEXT NOT NULL,
@@ -102,9 +112,9 @@ const buy = db.transaction((guildId, userId, productId) => {
   db.prepare('UPDATE stock SET sold = 1 WHERE id = ?').run(s.id);
   db.prepare('UPDATE users SET balance = balance - ?, total_spent = total_spent + ? WHERE guild_id = ? AND user_id = ?')
     .run(p.price, p.price, guildId, userId);
-  db.prepare('INSERT INTO purchases (guild_id, user_id, product_name, price, content, created_at) VALUES (?,?,?,?,?,?)')
+  const pur = db.prepare('INSERT INTO purchases (guild_id, user_id, product_name, price, content, created_at) VALUES (?,?,?,?,?,?)')
     .run(guildId, userId, p.name, p.price, s.content, Date.now());
-  return { product: p, content: s.content, balance: u.balance - p.price };
+  return { product: p, content: s.content, balance: u.balance - p.price, purchaseId: Number(pur.lastInsertRowid) };
 });
 
 // 충전 승인: pending 상태일 때만 1번 처리
