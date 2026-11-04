@@ -23,7 +23,12 @@ const commands = [
   new SlashCommandBuilder().setName('상품추가').setDescription('상품 추가 (서버 주인 전용)')
     .addStringOption((o) => o.setName('카테고리').setDescription('예: 계정, 쿠폰').setRequired(true))
     .addStringOption((o) => o.setName('이름').setDescription('상품 이름').setRequired(true))
-    .addIntegerOption((o) => o.setName('가격').setDescription('가격(원)').setMinValue(0).setRequired(true)),
+    .addIntegerOption((o) => o.setName('가격').setDescription('가격(원)').setMinValue(0).setRequired(true))
+    .addStringOption((o) => o.setName('링크필요').setDescription('구매시 서버 링크 입력 필요 여부 (o/x)').setRequired(false)),
+  new SlashCommandBuilder().setName('상품수정').setDescription('상품 가격 또는 링크 설정 변경 (서버 주인 전용)')
+    .addIntegerOption((o) => o.setName('상품번호').setDescription('/상품목록 에서 확인').setRequired(true))
+    .addIntegerOption((o) => o.setName('가격').setDescription('변경할 가격(원)').setMinValue(0).setRequired(false))
+    .addStringOption((o) => o.setName('링크필요').setDescription('서버 링크 입력 필요 여부 (o/x)').setRequired(false)),
   new SlashCommandBuilder().setName('재고추가').setDescription('상품 재고 추가 - 한 줄에 1개 (서버 주인 전용)')
     .addIntegerOption((o) => o.setName('상품번호').setDescription('/상품목록 에서 확인').setRequired(true)),
   new SlashCommandBuilder().setName('상품목록').setDescription('상품 번호/재고 확인 (서버 주인 전용)'),
@@ -46,9 +51,7 @@ const commands = [
 ].map((c) => c.toJSON());
 
 client.once('ready', async () => {
-  // 전역 명령어를 이 봇의 명령어로 통째로 교체 (예전에 등록된 전역 명령어 제거)
   await client.application.commands.set(commands);
-  // 예전 코드가 서버(길드) 단위로 등록해 둔 명령어도 모두 제거 → 중복 표시 방지
   for (const guild of client.guilds.cache.values()) {
     await guild.commands.set([]).catch((e) => console.warn(`길드 명령어 정리 실패 (${guild.name}):`, e.message));
   }
@@ -103,21 +106,16 @@ const admin = makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload
 /* ───────────── 메인 핸들러 ───────────── */
 client.on('interactionCreate', async (i) => {
   try {
-    // 서버 주인 DM에서 누르는 충전 승인/거절 버튼 (DM이라 guild 없음)
     if (i.isButton() && /^chg_(ok|no):/.test(i.customId)) return await handleChargeDecision(i);
-
-    // 후기 작성은 구매자 DM에서 진행되므로 guild 검사보다 먼저 처리
     if (i.isButton() && i.customId.startsWith('rv:')) return await reviewButton(i);
     if (i.isModalSubmit() && i.customId.startsWith('rvm:')) return await reviewSubmit(i);
 
     if (!i.guild) return;
 
-    // 라이센스 관련 명령은 라이센스 없어도 사용 가능
     if (i.isChatInputCommand() && ['라이센스등록', '라이센스확인', '라이센스생성', '라이센스목록'].includes(i.commandName)) {
       return await handleLicenseCmd(i);
     }
 
-    // 라이센스 만료 시 전체 기능 잠금
     if (!isLicensed(i.guildId)) {
       return await i.reply({
         content: '⛔ 이 서버의 자판기 라이센스가 만료되었거나 등록되지 않았어요.\n서버 주인이 `/라이센스등록` 으로 키를 등록해 주세요.',
@@ -175,9 +173,34 @@ async function handleCommand(i) {
       return i.showModal(modal);
     }
     case '상품추가': {
-      const info = db.prepare('INSERT INTO products (guild_id, category, name, price) VALUES (?,?,?,?)')
-        .run(gid, i.options.getString('카테고리').slice(0, 20), i.options.getString('이름').slice(0, 60), i.options.getInteger('가격'));
-      return i.reply({ content: `✅ 상품 추가 완료 (번호 **${info.lastInsertRowid}**)\n\`/재고추가 ${info.lastInsertRowid}\` 로 재고를 넣어 주세요.`, ...EPH });
+      const linkReqStr = (i.options.getString('링크필요') || 'x').trim().toLowerCase();
+      const requireServerLink = ['o', 'y', 'yes', 'true', '1', '네', 'ㅇ'].includes(linkReqStr) ? 1 : 0;
+
+      const info = db.prepare('INSERT INTO products (guild_id, category, name, price, require_server_link) VALUES (?,?,?,?,?)')
+        .run(gid, i.options.getString('카테고리').slice(0, 20), i.options.getString('이름').slice(0, 60), i.options.getInteger('가격'), requireServerLink);
+      return i.reply({ content: `✅ 상품 추가 완료 (번호 **${info.lastInsertRowid}**)${requireServerLink ? ' (🔗 서버 링크 입력 필수 상품)' : ''}\n\`/재고추가 ${info.lastInsertRowid}\` 로 재고를 넣어 주세요.`, ...EPH });
+    }
+    case '상품수정': {
+      const pid = i.options.getInteger('상품번호');
+      const p = db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(pid, gid);
+      if (!p) return i.reply({ content: '❌ 없는 상품 번호예요.', ...EPH });
+
+      const newPrice = i.options.getInteger('가격');
+      const linkReqOpt = i.options.getString('링크필요');
+
+      let updatePrice = p.price;
+      let updateLinkReq = p.require_server_link;
+
+      if (newPrice !== null && newPrice !== undefined) updatePrice = newPrice;
+      if (linkReqOpt !== null && linkReqOpt !== undefined) {
+        const linkReqStr = linkReqOpt.trim().toLowerCase();
+        updateLinkReq = ['o', 'y', 'yes', 'true', '1', '네', 'ㅇ'].includes(linkReqStr) ? 1 : 0;
+      }
+
+      db.prepare('UPDATE products SET price = ?, require_server_link = ? WHERE id = ? AND guild_id = ?')
+        .run(updatePrice, updateLinkReq, pid, gid);
+
+      return i.reply({ content: `✅ **#${pid} ${p.name}** 상품이 수정되었습니다!\n• 가격: ${won(updatePrice)}\n• 서버 링크 필요 여부: ${updateLinkReq ? '필요함(O)' : '필요없음(X)'}`, ...EPH });
     }
     case '재고추가': {
       const pid = i.options.getInteger('상품번호');
@@ -194,7 +217,7 @@ async function handleCommand(i) {
       const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
                                FROM products p WHERE guild_id = ? ORDER BY id`).all(gid);
       const text = rows.length
-        ? rows.map((r) => `**#${r.id}** [${r.category}] ${r.name} — ${won(r.price)} (재고 ${r.cnt})`).join('\n')
+        ? rows.map((r) => `**#${r.id}** [${r.category}] ${r.name} — ${won(r.price)} (재고 ${r.cnt})${r.require_server_link ? ' 🔗링크필요' : ''}`).join('\n')
         : '등록된 상품이 없어요. `/상품추가` 로 만들어 주세요.';
       return i.reply({ content: text.slice(0, 1900), ...EPH });
     }
@@ -257,7 +280,7 @@ async function handleButton(i) {
       .addFields(
         { name: '보유 잔액', value: won(u.balance), inline: true },
         { name: '누적 사용', value: won(u.total_spent), inline: true },
-        { name: '최근 구매 5건', value: recent.length ? recent.map((r) => `• ${r.product_name} — ${won(r.price)} (${ts(r.created_at)})`).join('\n') : '구매 내역이 없어요.' },
+        { name: '최근 구매 5건', value: recent.length ? recent.map((r) => `• ${r.product_name} — ${won(r.price)} ${r.server_link ? `(링크: ${r.server_link})` : ''} (${ts(r.created_at)})`).join('\n') : '구매 내역이 없어요.' },
       );
     return i.reply({ embeds: [embed], ...EPH });
   }
@@ -268,10 +291,26 @@ async function handleButton(i) {
     return i.reply({ embeds: [new EmbedBuilder().setColor(0xff88cc).setTitle('💗 이용가이드').setDescription(text)], ...EPH });
   }
 
-  // 구매 확정 버튼
+  // 구매 버튼 클릭 시
   if (i.customId.startsWith('buy:')) {
-    const res = buy(gid, i.user.id, Number(i.customId.split(':')[1]));
-    if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });    await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
+    const pid = Number(i.customId.split(':')[1]);
+    const p = db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(pid, gid);
+    if (!p) return i.update({ content: '❌ 존재하지 않는 상품이에요.', components: [] });
+
+    // 서버 링크가 필요한 상품인 경우 모달을 띄움
+    if (p.require_server_link === 1) {
+      const modal = new ModalBuilder().setCustomId(`buy_link_modal:${pid}`).setTitle('서버 링크 입력').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('server_link').setLabel('초대 링크 또는 서버 주소를 입력해주세요').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('예: https://discord.gg/xxxx 또는 서버 주소'),
+        ),
+      );
+      return i.showModal(modal);
+    }
+
+    // 링크가 필요 없는 일반 상품은 즉시 구매 진행
+    const res = buy(gid, i.user.id, pid, null);
+    if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });
+    await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
     i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
     await afterPurchase(i, res);
     return;
@@ -297,16 +336,23 @@ async function afterPurchase(i, res) {
 
   // 2) 구매 로그 채널에 기록
   const line = '═'.repeat(28);
+  const logFields = [
+    line,
+    '═'.repeat(14),
+    `• **구매자:** ${i.user} (\`${i.user.id}\`)`,
+    `• **상품명:** ${res.product.name}`,
+    `• **결제금액:** \`${won(res.product.price)}\``,
+  ];
+  if (res.serverLink) {
+    logFields.push(`• **입력 서버 링크:** \`${res.serverLink}\``);
+  }
+  if (roleNote) {
+    logFields.push(`• **구매자 역할:** ${roleNote}`);
+  }
+
   const log = new EmbedBuilder().setColor(0x57f287)
     .setTitle('💎🩷🤍🖤📦 새로운 구매 발생')
-    .setDescription([
-      line,
-      '═'.repeat(14),
-      `• **구매자:** ${i.user} (\`${i.user.id}\`)`,
-      `• **상품명:** ${res.product.name}`,
-      `• **결제금액:** \`${won(res.product.price)}\``,
-      ...(roleNote ? [`• **구매자 역할:** ${roleNote}`] : []),
-    ].join('\n'))
+    .setDescription(logFields.join('\n'))
     .setFooter({ text: g.footer_text || `✦ ${BOT_NAME} ✦` }).setTimestamp();
   admin.log(i.guild, log);
 
@@ -357,7 +403,6 @@ async function reviewSubmit(i) {
   const ch = guild && await guild.channels.fetch(g.review_channel).catch(() => null);
   if (!ch || !ch.isTextBased()) return i.reply({ content: '❌ 후기 채널을 찾을 수 없어요. 서버 주인에게 문의해 주세요.', ...EPH });
 
-  // 구매 1건당 후기 1개 (UNIQUE 제약으로 중복 방지)
   try {
     db.prepare('INSERT INTO reviews (purchase_id, guild_id, user_id, rating, content, created_at) VALUES (?,?,?,?,?,?)')
       .run(pid, pur.guild_id, i.user.id, rating, text, Date.now());
@@ -478,7 +523,6 @@ async function myAttendance(i) {
 
 /* ───────────── 셀렉트 메뉴 ───────────── */
 async function handleSelect(i) {
-  // 1단계: 카테고리 선택 → 해당 카테고리 상품 목록
   if (i.customId === 'cat') {
     const category = i.values[0];
     const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
@@ -487,14 +531,13 @@ async function handleSelect(i) {
     const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder('구매할 상품을 선택하세요').addOptions(
       rows.map((r) => ({
         label: r.name.slice(0, 100),
-        description: `${won(r.price)} · ${r.cnt > 0 ? `재고 ${r.cnt}개` : '품절'}`,
+        description: `${won(r.price)} · ${r.cnt > 0 ? `재고 ${r.cnt}개` : '품절'}${r.require_server_link ? ' · 🔗링크필요' : ''}`,
         value: String(r.id),
       })),
     );
     return i.update({ content: `🛒 **${category}** — 상품을 선택해 주세요.`, components: [new ActionRowBuilder().addComponents(menu)] });
   }
 
-  // 2단계: 상품 선택 → 구매 확인
   if (i.customId !== 'pick') return;
   const p = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
                         FROM products p WHERE id = ? AND guild_id = ?`).get(Number(i.values[0]), i.guildId);
@@ -505,7 +548,7 @@ async function handleSelect(i) {
     new ButtonBuilder().setCustomId('buy_cancel').setLabel('취소').setStyle(ButtonStyle.Secondary),
   );
   return i.update({
-    content: `**${p.name}** [${p.category}]\n가격: ${won(p.price)} · 재고: ${p.cnt > 0 ? `${p.cnt}개` : '품절'}\n내 잔액: ${won(u.balance)}`,
+    content: `**${p.name}** [${p.category}]\n가격: ${won(p.price)} · 재고: ${p.cnt > 0 ? `${p.cnt}개` : '품절'}${p.require_server_link ? '\n🔗 **이 상품은 구매 시 서버 링크 입력이 필요합니다.**' : ''}\n내 잔액: ${won(u.balance)}`,
     components: [row],
   });
 }
@@ -521,6 +564,20 @@ async function handleModal(i) {
     db.prepare('UPDATE guilds SET bank_info = ?, guide = ?, min_charge = ? WHERE guild_id = ?')
       .run(i.fields.getTextInputValue('bank'), i.fields.getTextInputValue('guide'), min, gid);
     return i.reply({ content: '✅ 설정을 저장했어요.', ...EPH });
+  }
+
+  // 서버 링크 입력 후 최종 구매 처리 모달 제출
+  if (i.customId.startsWith('buy_link_modal:')) {
+    const pid = Number(i.customId.split(':')[1]);
+    const serverLink = i.fields.getTextInputValue('server_link').trim();
+
+    const res = buy(gid, i.user.id, pid, serverLink);
+    if (res.err) return i.reply({ content: `❌ ${res.err}`, ...EPH });
+
+    await i.reply({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, ...EPH });
+    i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n입력한 서버 링크: ${serverLink}\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
+    await afterPurchase(i, res);
+    return;
   }
 
   if (i.customId.startsWith('stock:')) {
@@ -545,7 +602,6 @@ async function handleModal(i) {
       .run(gid, i.user.id, amount, depositor, Date.now());
     const chargeId = Number(info.lastInsertRowid);
 
-    // 충전 신청은 "서버 주인" 에게만 DM 전송
     const embed = new EmbedBuilder().setColor(0xffcc4d).setTitle('💰 충전 신청이 도착했어요')
       .addFields(
         { name: '서버', value: i.guild.name, inline: true },

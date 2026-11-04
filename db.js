@@ -30,11 +30,12 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS products (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  guild_id TEXT NOT NULL,
-  category TEXT NOT NULL,
-  name     TEXT NOT NULL,
-  price    INTEGER NOT NULL
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id            TEXT NOT NULL,
+  category            TEXT NOT NULL,
+  name                TEXT NOT NULL,
+  price               INTEGER NOT NULL,
+  require_server_link INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS stock (
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS purchases (
   product_name TEXT NOT NULL,
   price        INTEGER NOT NULL,
   content      TEXT NOT NULL,
+  server_link  TEXT,
   created_at   INTEGER NOT NULL
 );
 
@@ -83,10 +85,20 @@ CREATE TABLE IF NOT EXISTS attendance (
 );
 `);
 
-// 기존 DB에 새 설정 컬럼 추가 (이미 있으면 건너뜀)
+// 기존 DB에 새 설정 컬럼 및 상품 테이블 컬럼 추가
 const guildCols = db.prepare('PRAGMA table_info(guilds)').all().map((c) => c.name);
 for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text', 'buyer_role', 'review_channel', 'charge_log_channel']) {
   if (!guildCols.includes(col)) db.exec(`ALTER TABLE guilds ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+}
+
+const productCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
+if (!productCols.includes('require_server_link')) {
+  db.exec(`ALTER TABLE products ADD COLUMN require_server_link INTEGER NOT NULL DEFAULT 0`);
+}
+
+const purchaseCols = db.prepare('PRAGMA table_info(purchases)').all().map((c) => c.name);
+if (!purchaseCols.includes('server_link')) {
+  db.exec(`ALTER TABLE purchases ADD COLUMN server_link TEXT`);
 }
 
 const q = {
@@ -100,8 +112,8 @@ const q = {
   },
 };
 
-// 구매: 잔액 차감 + 재고 1개 소진을 한 트랜잭션으로 (동시 구매에도 중복 지급 없음)
-const buy = db.transaction((guildId, userId, productId) => {
+// 구매: 잔액 차감 + 재고 1개 소진을 한 트랜잭션으로 (서버 링크 선택적 포함)
+const buy = db.transaction((guildId, userId, productId, serverLink = null) => {
   const p = db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(productId, guildId);
   if (!p) return { err: '존재하지 않는 상품이에요.' };
   const u = q.getUser(guildId, userId);
@@ -112,9 +124,9 @@ const buy = db.transaction((guildId, userId, productId) => {
   db.prepare('UPDATE stock SET sold = 1 WHERE id = ?').run(s.id);
   db.prepare('UPDATE users SET balance = balance - ?, total_spent = total_spent + ? WHERE guild_id = ? AND user_id = ?')
     .run(p.price, p.price, guildId, userId);
-  const pur = db.prepare('INSERT INTO purchases (guild_id, user_id, product_name, price, content, created_at) VALUES (?,?,?,?,?,?)')
-    .run(guildId, userId, p.name, p.price, s.content, Date.now());
-  return { product: p, content: s.content, balance: u.balance - p.price, purchaseId: Number(pur.lastInsertRowid) };
+  const pur = db.prepare('INSERT INTO purchases (guild_id, user_id, product_name, price, content, server_link, created_at) VALUES (?,?,?,?,?,?,?)')
+    .run(guildId, userId, p.name, p.price, s.content, serverLink, Date.now());
+  return { product: p, content: s.content, balance: u.balance - p.price, purchaseId: Number(pur.lastInsertRowid), serverLink };
 });
 
 // 충전 승인: pending 상태일 때만 1번 처리

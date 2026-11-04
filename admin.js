@@ -1,4 +1,3 @@
-// 서버 주인용 관리 패널 (/관리) — 버튼/선택메뉴/모달로 설정 전부 처리
 const {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
   UserSelectMenuBuilder, ChannelSelectMenuBuilder, RoleSelectMenuBuilder, ChannelType,
@@ -13,7 +12,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
   const ti = (id, label, style, o = {}) => {
     const t = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(o.required !== false);
     if (o.max) t.setMaxLength(o.max);
-    if (o.value) t.setValue(String(o.value).slice(0, o.max || 4000));
+    if (o.value !== undefined && o.value !== null) t.setValue(String(o.value).slice(0, o.max || 4000));
     if (o.placeholder) t.setPlaceholder(o.placeholder);
     return row(t);
   };
@@ -48,6 +47,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
       components: [
         row(
           btn('adm_addprod', '상품 등록', '📦', ButtonStyle.Primary),
+          btn('adm_editprod', '상품 수정', '✏️', ButtonStyle.Primary),
           btn('adm_addstock', '재고 추가', '📥', ButtonStyle.Primary),
           btn('adm_delprod', '상품 삭제', '🗑️', ButtonStyle.Danger),
           btn('adm_list', '상품 목록', '📋'),
@@ -82,7 +82,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
       new StringSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).addOptions(
         rows.map((r) => ({
           label: `#${r.id} [${r.category}] ${r.name}`.slice(0, 100),
-          description: `${won(r.price)} · 재고 ${r.cnt}개`,
+          description: `${won(r.price)} · 재고 ${r.cnt}개${r.require_server_link ? ' · 🔗링크필요' : ''}`,
           value: String(r.id),
         })),
       ),
@@ -91,14 +91,13 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
   const getProduct = (gid, id) => db.prepare('SELECT * FROM products WHERE id = ? AND guild_id = ?').get(Number(id), gid);
 
   /* ───── 로그 채널로 알림 ───── */
-  // key: 'log_channel'(구매 로그) | 'charge_log_channel'(충전 로그) — 서로 다른 채널로 분리
   async function log(guild, embed, key = 'log_channel') {
     try {
       const g = q.getGuild(guild.id);
       if (!g[key]) return;
       const ch = await guild.channels.fetch(g[key]).catch(() => null);
       if (ch && ch.isTextBased()) await ch.send({ embeds: [embed] });
-    } catch { /* 로그 실패는 무시 */ }
+    } catch { /* 로그 실패 무시 */ }
   }
 
   /* ───── 핸들러 ───── */
@@ -118,7 +117,14 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
             ti('cat', '카테고리', TextInputStyle.Short, { max: 20, placeholder: '예: 계정, 쿠폰' }),
             ti('name', '상품 이름', TextInputStyle.Short, { max: 60 }),
             ti('price', '가격(원)', TextInputStyle.Short, { max: 10, placeholder: '숫자만 입력 예: 5000' }),
+            ti('link_req', '서버 링크 입력 필요 여부 (o 또는 x)', TextInputStyle.Short, { max: 5, value: 'x', placeholder: 'o 또는 x 입력' }),
           ));
+
+        case 'adm_editprod': {
+          const menu = productMenu(gid, 'adm_s_edit', '수정할 상품 선택');
+          if (!menu) return i.reply({ content: '😢 등록된 상품이 없어요.', ...EPH });
+          return i.reply({ content: '✏️ 수정할 상품을 골라 주세요.', components: [menu], ...EPH });
+        }
 
         case 'adm_addstock': {
           const menu = productMenu(gid, 'adm_s_stock', '재고를 넣을 상품 선택');
@@ -136,7 +142,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           const rows = db.prepare(`SELECT p.*, (SELECT COUNT(*) FROM stock s WHERE s.product_id = p.id AND s.sold = 0) AS cnt
                                    FROM products p WHERE guild_id = ? ORDER BY category, id`).all(gid);
           const text = rows.length
-            ? rows.map((r) => `**#${r.id}** [${r.category}] ${r.name} — ${won(r.price)} (재고 ${r.cnt})`).join('\n')
+            ? rows.map((r) => `**#${r.id}** [${r.category}] ${r.name} — ${won(r.price)} (재고 ${r.cnt})${r.require_server_link ? ' 🔗링크필요' : ''}`).join('\n')
             : '등록된 상품이 없어요.';
           return i.reply({ content: text.slice(0, 1900), ...EPH });
         }
@@ -275,6 +281,15 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
 
     /* 선택 메뉴 */
     if (i.isAnySelectMenu()) {
+      if (id === 'adm_s_edit') {
+        const p = getProduct(gid, i.values[0]);
+        if (!p) return i.update({ content: '❌ 없는 상품이에요.', components: [] });
+        return i.showModal(modal(`adm_m_editprod:${p.id}`, `상품 수정 - ${p.name}`.slice(0, 45),
+          ti('name', '상품 이름', TextInputStyle.Short, { value: p.name, max: 60 }),
+          ti('price', '가격(원)', TextInputStyle.Short, { value: String(p.price), max: 10 }),
+          ti('link_req', '서버 링크 필요 여부 (o 또는 x)', TextInputStyle.Short, { value: p.require_server_link ? 'o' : 'x', max: 5 }),
+        ));
+      }
       if (id === 'adm_s_stock') {
         const p = getProduct(gid, i.values[0]);
         if (!p) return i.update({ content: '❌ 없는 상품이에요.', components: [] });
@@ -344,9 +359,25 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
       if (id === 'adm_m_addprod') {
         const price = parseInt(i.fields.getTextInputValue('price').replace(/\D/g, ''), 10);
         if (Number.isNaN(price)) return i.reply({ content: '❌ 가격은 숫자로 입력해 주세요.', ...EPH });
-        const info = db.prepare('INSERT INTO products (guild_id, category, name, price) VALUES (?,?,?,?)')
-          .run(gid, i.fields.getTextInputValue('cat').trim(), i.fields.getTextInputValue('name').trim(), price);
+        const linkReqStr = i.fields.getTextInputValue('link_req').trim().toLowerCase();
+        const requireServerLink = ['o', 'y', 'yes', 'true', '1', '네', 'ㅇ'].includes(linkReqStr) ? 1 : 0;
+
+        const info = db.prepare('INSERT INTO products (guild_id, category, name, price, require_server_link) VALUES (?,?,?,?,?)')
+          .run(gid, i.fields.getTextInputValue('cat').trim(), i.fields.getTextInputValue('name').trim(), price, requireServerLink);
         return i.reply({ content: `✅ 상품 등록 완료 (번호 **${info.lastInsertRowid}**)\n이제 관리 패널의 📥 **재고 추가**로 재고를 넣어 주세요.`, ...EPH });
+      }
+
+      if (id.startsWith('adm_m_editprod:')) {
+        const pid = id.split(':')[1];
+        const name = i.fields.getTextInputValue('name').trim();
+        const price = parseInt(i.fields.getTextInputValue('price').replace(/\D/g, ''), 10);
+        if (Number.isNaN(price)) return i.reply({ content: '❌ 가격은 숫자로 입력해 주세요.', ...EPH });
+        const linkReqStr = i.fields.getTextInputValue('link_req').trim().toLowerCase();
+        const requireServerLink = ['o', 'y', 'yes', 'true', '1', '네', 'ㅇ'].includes(linkReqStr) ? 1 : 0;
+
+        db.prepare('UPDATE products SET name = ?, price = ?, require_server_link = ? WHERE id = ? AND guild_id = ?')
+          .run(name, price, requireServerLink, pid, gid);
+        return i.reply({ content: `✅ 상품 정보(이름, 가격, 링크 필수 여부)가 수정되었습니다!`, ...EPH });
       }
 
       if (id.startsWith('adm_m_stock:')) {
