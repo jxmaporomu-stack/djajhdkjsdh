@@ -318,7 +318,7 @@ async function handleButton(i) {
   if (i.customId === 'buy_cancel') return i.update({ content: '구매를 취소했어요.', components: [] });
 }
 
-/* ───────────── 구매 후 처리 (역할 지급 / 구매 로그 / 후기 안내 DM) ───────────── */
+/* ───────────── 구매 후 처리 (역할 지급 / 구매 로그 / 서버주인 DM 알림 / 후기 안내 DM) ───────────── */
 async function afterPurchase(i, res) {
   const g = q.getGuild(i.guildId);
 
@@ -355,6 +355,26 @@ async function afterPurchase(i, res) {
     .setDescription(logFields.join('\n'))
     .setFooter({ text: g.footer_text || `✦ ${BOT_NAME} ✦` }).setTimestamp();
   admin.log(i.guild, log);
+
+  // 2.5) 서버 링크가 포함된 상품일 경우 서버 주인 DM으로 직접 알림 전송
+  if (res.serverLink) {
+    try {
+      const owner = await i.guild.fetchOwner();
+      const ownerEmbed = new EmbedBuilder().setColor(0x5865f2)
+        .setTitle('🔗 새로운 상품 구매 (서버 링크 접수)')
+        .addFields(
+          { name: '서버', value: i.guild.name, inline: true },
+          { name: '구매자', value: `${i.user} (${i.user.tag})`, inline: true },
+          { name: '상품명', value: res.product.name, inline: true },
+          { name: '결제금액', value: won(res.product.price), inline: true },
+          { name: '입력한 서버 링크', value: res.serverLink, inline: false },
+        )
+        .setTimestamp();
+      await owner.send({ embeds: [ownerEmbed] }).catch(() => {});
+    } catch (e) {
+      console.warn('서버 주인 DM 전송 실패:', e.message);
+    }
+  }
 
   // 3) 구매자 DM으로 후기 작성 안내
   if (g.review_channel) {
