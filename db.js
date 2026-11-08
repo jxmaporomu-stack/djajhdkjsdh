@@ -87,9 +87,14 @@ CREATE TABLE IF NOT EXISTS attendance (
 
 // 기존 DB에 새 설정 컬럼 및 상품 테이블 컬럼 추가
 const guildCols = db.prepare('PRAGMA table_info(guilds)').all().map((c) => c.name);
-for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text', 'buyer_role', 'review_channel', 'charge_log_channel']) {
+for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text', 'buyer_role', 'review_channel', 'charge_log_channel', 'stock_log_channel']) {
   if (!guildCols.includes(col)) db.exec(`ALTER TABLE guilds ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
 }
+
+const guildCols2 = db.prepare('PRAGMA table_info(guilds)').all().map(c => c.name);
+if (!guildCols2.includes('premium_expires_at')) db.exec('ALTER TABLE guilds ADD COLUMN premium_expires_at INTEGER NOT NULL DEFAULT 0');
+const licenseCols = db.prepare('PRAGMA table_info(licenses)').all().map(c => c.name);
+if (!licenseCols.includes('tier')) db.exec("ALTER TABLE licenses ADD COLUMN tier TEXT NOT NULL DEFAULT 'standard'");
 
 const productCols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name);
 if (!productCols.includes('require_server_link')) {
@@ -111,6 +116,26 @@ const q = {
     return db.prepare('SELECT * FROM users WHERE guild_id = ? AND user_id = ?').get(guildId, userId);
   },
 };
+
+// 재고 추가 감사 기록 (내용/키는 저장하거나 로그 채널에 노출하지 않음)
+db.exec(`CREATE TABLE IF NOT EXISTS stock_add_logs (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, product_id INTEGER NOT NULL,
+ product_name TEXT NOT NULL, actor_id TEXT NOT NULL, quantity INTEGER NOT NULL,
+ stock_after INTEGER NOT NULL, created_at INTEGER NOT NULL
+)`);
+
+const addStock = db.transaction((guildId, productId, actorId, lines) => {
+  const product = db.prepare('SELECT * FROM products WHERE guild_id=? AND id=?').get(guildId, productId);
+  if (!product) return { err: '존재하지 않는 상품입니다.' };
+  const items = lines.map(x => x.trim()).filter(Boolean);
+  if (!items.length) return { err: '추가할 재고가 없습니다.' };
+  const insert = db.prepare('INSERT INTO stock (product_id, content) VALUES (?,?)');
+  for (const item of items) insert.run(productId, item);
+  const after = db.prepare('SELECT COUNT(*) AS n FROM stock WHERE product_id=? AND sold=0').get(productId).n;
+  db.prepare('INSERT INTO stock_add_logs (guild_id,product_id,product_name,actor_id,quantity,stock_after,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run(guildId,productId,product.name,actorId,items.length,after,Date.now());
+  return { product, quantity: items.length, after };
+});
 
 // 구매: 잔액 차감 + 재고 1개 소진을 한 트랜잭션으로 (서버 링크 선택적 포함)
 const buy = db.transaction((guildId, userId, productId, serverLink = null) => {
@@ -153,11 +178,13 @@ const redeemLicense = db.transaction((key, guildId) => {
   if (!l) return { err: '존재하지 않는 라이센스 키예요.' };
   if (l.used_guild) return { err: '이미 사용된 라이센스 키예요.' };
   const g = q.getGuild(guildId);
-  const base = Math.max(Date.now(), g.expires_at);
+  const tier = l.tier === 'premium' ? 'premium' : 'standard';
+  const column = tier === 'premium' ? 'premium_expires_at' : 'expires_at';
+  const base = Math.max(Date.now(), g[column]);
   const expires = base + l.days * 86400000;
   db.prepare('UPDATE licenses SET used_guild = ?, used_at = ? WHERE key = ?').run(guildId, Date.now(), key);
-  db.prepare('UPDATE guilds SET expires_at = ? WHERE guild_id = ?').run(expires, guildId);
-  return { days: l.days, expires };
+  db.prepare(`UPDATE guilds SET ${column} = ? WHERE guild_id = ?`).run(expires, guildId);
+  return { days: l.days, expires, tier };
 });
 
-module.exports = { db, q, buy, approveCharge, rejectCharge, redeemLicense };
+module.exports = { db, q, buy, approveCharge, rejectCharge, redeemLicense, addStock };

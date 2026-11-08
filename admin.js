@@ -3,7 +3,7 @@ const {
   UserSelectMenuBuilder, ChannelSelectMenuBuilder, RoleSelectMenuBuilder, ChannelType,
   PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const { db, q, redeemLicense } = require('./db');
+const { db, q, redeemLicense, addStock } = require('./db');
 
 module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload, licenseText }) {
   const row = (...c) => new ActionRowBuilder().addComponents(...c);
@@ -38,6 +38,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         { name: '💰 최소 충전', value: won(g.min_charge), inline: true },
         { name: '📢 구매 로그 채널', value: g.log_channel ? `<#${g.log_channel}>` : '미설정', inline: true },
         { name: '💳 충전 로그 채널', value: g.charge_log_channel ? `<#${g.charge_log_channel}>` : '미설정', inline: true },
+        { name: '📥 재고 추가 로그', value: g.stock_log_channel ? `<#${g.stock_log_channel}>` : '미설정', inline: true },
         { name: '🏦 계좌 안내', value: g.bank_info ? '설정됨 ✅' : '미설정 ❌', inline: true },
         { name: '🏷️ 구매자 역할', value: g.buyer_role ? `<@&${g.buyer_role}>` : '미설정', inline: true },
         { name: '✍️ 후기 채널', value: g.review_channel ? `<#${g.review_channel}>` : '미설정', inline: true },
@@ -69,6 +70,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           btn('adm_role', '구매자 역할', '🏷️'),
           btn('adm_review', '후기 채널(DM 안내)', '✍️'),
           btn('adm_chglog', '충전 로그 채널', '💳'),
+          btn('adm_stocklog', '재고 로그 채널', '📥'),
         ),
       ],
     };
@@ -224,6 +226,19 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           db.prepare("UPDATE guilds SET charge_log_channel = '' WHERE guild_id = ?").run(gid);
           return i.update({ content: '🔕 충전 로그를 껐어요.', components: [] });
 
+        case 'adm_stocklog':
+          return i.reply({
+            content: '📥 재고 추가 로그를 전송할 채널을 선택하세요.',
+            components: [
+              row(new ChannelSelectMenuBuilder().setCustomId('adm_s_stocklog').setPlaceholder('재고 로그 채널 선택')
+                .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
+              row(btn('adm_stocklogclear', '재고 로그 끄기', '🔕'))
+            ], ...EPH
+          });
+        case 'adm_stocklogclear':
+          db.prepare("UPDATE guilds SET stock_log_channel='' WHERE guild_id=?").run(gid);
+          return i.update({ content: '🔕 재고 추가 로그를 껐어요.', components: [] });
+
         case 'adm_balance':
           return i.reply({
             content: '💰 잔액을 지급/차감할 유저를 골라 주세요.',
@@ -331,6 +346,13 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         db.prepare('UPDATE guilds SET review_channel = ? WHERE guild_id = ?').run(ch.id, gid);
         return i.update({ content: `✅ 후기 채널: <#${ch.id}>\n구매 후 구매자 DM으로 이 채널 안내가 가요.`, components: [] });
       }
+      if (id === 'adm_s_stocklog') {
+        const ch = i.channels.first();
+        try { await ch.send({ content: '✅ 자판기 **재고 추가 로그** 채널로 설정되었습니다.' }); }
+        catch { return i.update({ content: '❌ 봇에게 해당 채널 메시지 전송 권한이 없습니다.', components: [] }); }
+        db.prepare('UPDATE guilds SET stock_log_channel=? WHERE guild_id=?').run(ch.id, gid);
+        return i.update({ content: `✅ 재고 추가 로그: <#${ch.id}>`, components: [] });
+      }
       if (id === 'adm_s_chglog') {
         const ch = i.channels.first();
         try {
@@ -384,9 +406,18 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         const p = getProduct(gid, id.split(':')[1]);
         if (!p) return i.reply({ content: '❌ 없는 상품이에요.', ...EPH });
         const lines = i.fields.getTextInputValue('lines').split('\n').map((s) => s.trim()).filter(Boolean);
-        const ins = db.prepare('INSERT INTO stock (product_id, content) VALUES (?, ?)');
-        db.transaction(() => lines.forEach((l) => ins.run(p.id, l)))();
-        return i.reply({ content: `✅ **${p.name}** 재고 **${lines.length}개** 추가했어요.`, ...EPH });
+        const result = addStock(gid, p.id, i.user.id, lines);
+        if (result.err) return i.reply({ content: `❌ ${result.err}`, ...EPH });
+        const embed = new EmbedBuilder().setColor(0x57f287).setTitle('📥 자판기 재고 추가 로그')
+          .addFields(
+            { name: '상품', value: `#${p.id} ${p.name}`.slice(0,1024) },
+            { name: '상품 가격', value: won(result.product.price), inline: true },
+            { name: '추가 수량', value: `${result.quantity}개`, inline: true },
+            { name: '추가 후 재고', value: `${result.after}개`, inline: true },
+            { name: '추가 관리자', value: `<@${i.user.id}>` }
+          ).setTimestamp();
+        await log(i.guild, embed, 'stock_log_channel');
+        return i.reply({ content: `✅ **${p.name}** 재고 **${result.quantity}개** 추가했어요. (현재 ${result.after}개)`, ...EPH });
       }
 
       if (id.startsWith('adm_m_bal:')) {
@@ -425,7 +456,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
       if (id === 'adm_m_lic') {
         const res = redeemLicense(i.fields.getTextInputValue('key').trim().toUpperCase(), gid);
         if (res.err) return i.reply({ content: `❌ ${res.err}`, ...EPH });
-        return i.reply({ content: `✅ **${res.days}일** 라이센스 등록 완료!\n만료일: ${ts(res.expires)}`, ...EPH });
+        return i.reply({ content: `✅ **${res.tier === 'premium' ? '프리미엄' : '일반'} ${res.days}일** 라이센스 등록 완료!\n만료일: ${ts(res.expires)}`, ...EPH });
       }
     }
   }

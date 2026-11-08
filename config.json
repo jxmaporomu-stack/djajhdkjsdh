@@ -1,0 +1,32 @@
+{
+  "guildId": "1454687073280721140",
+  "adminRoleIds": [],
+  "ltcAddress": "LVBKYSb37cJXjFwwBiieQj1KKNPa5yZZAk",
+  "minConfirmations": 1,
+  "paymentExpiryMinutes": 30,
+  "dailyPingLimit": 3,
+  "timezone": "Asia/Seoul",
+  "blockExplorerApi": "https://litecoinspace.org/api",
+  "categories": [
+    {
+      "key": "normal",
+      "label": "일반 슬롯",
+      "emoji": "🛒",
+      "prefix": "🛒・",
+      "priceLtc": "0.01000000",
+      "durationDays": 30,
+      "baseCategoryId": "1454687074920960101",
+      "maxChannels": 50
+    },
+    {
+      "key": "vip",
+      "label": "VIP 슬롯",
+      "emoji": "💎",
+      "prefix": "💎・",
+      "priceLtc": "0.02000000",
+      "durationDays": 30,
+      "baseCategoryId": "1454687074920960101",
+      "maxChannels": 50
+    }
+  ]
+}

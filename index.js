@@ -5,7 +5,7 @@ const {
   StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, MessageFlags,
 } = require('discord.js');
-const { db, q, buy, approveCharge, rejectCharge, redeemLicense } = require('./db');
+const { db, q, buy, approveCharge, rejectCharge, redeemLicense, addStock } = require('./db');
 const makeAdmin = require('./admin');
 
 const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
@@ -14,7 +14,9 @@ const EPH = { flags: MessageFlags.Ephemeral };
 const won = (n) => `${Number(n).toLocaleString()}원`;
 const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+// 슬롯 기능은 ENABLE_SLOTS=true일 때 같은 클라이언트에 추가됩니다.
+const slotBot = process.env.ENABLE_SLOTS === 'true' ? require('./slot')(client, { isPremium: gid => q.getGuild(gid).premium_expires_at > Date.now() }) : null;
 
 /* ───────────── 슬래시 커맨드 정의 ───────────── */
 const commands = [
@@ -43,6 +45,8 @@ const commands = [
   new SlashCommandBuilder().setName('라이센스생성').setDescription('라이센스 키 생성 (봇 판매자 전용)')
     .addIntegerOption((o) => o.setName('기간').setDescription('이용 기간').setRequired(true)
       .addChoices({ name: '1개월 (30일)', value: 30 }, { name: '2개월 (60일)', value: 60 }, { name: '3개월 (90일)', value: 90 }))
+    .addStringOption(o => o.setName('등급').setDescription('일반 또는 프리미엄 (슬롯 포함)').setRequired(true)
+      .addChoices({ name: '일반 (자판기)', value: 'standard' }, { name: '프리미엄 (자판기 + 슬롯)', value: 'premium' }))
     .addIntegerOption((o) => o.setName('개수').setDescription('생성 개수 (기본 1, 최대 20)').setMinValue(1).setMaxValue(20)),
   new SlashCommandBuilder().setName('라이센스목록').setDescription('미사용 라이센스 목록 (봇 판매자 전용)'),
   new SlashCommandBuilder().setName('출퇴근패널').setDescription('출퇴근 패널을 이 채널에 올립니다 (서버 주인 전용)'),
@@ -53,15 +57,18 @@ const commands = [
 client.once('ready', async () => {
   await client.application.commands.set(commands);
   for (const guild of client.guilds.cache.values()) {
+    if (slotBot && guild.id === slotBot.guildId) continue;
     await guild.commands.set([]).catch((e) => console.warn(`길드 명령어 정리 실패 (${guild.name}):`, e.message));
   }
-  console.log(`✅ 로그인: ${client.user.tag}`);
+  if (slotBot) await slotBot.ready();
+  console.log(`✅ 통합 봇 로그인: ${client.user.tag}`);
 });
 
 /* ───────────── 유틸 ───────────── */
 const isMaster = (id) => id === MASTER_ID;
 const isOwner = (i) => i.user.id === i.guild.ownerId;
-const isLicensed = (guildId) => FREE_GUILDS.includes(guildId) || q.getGuild(guildId).expires_at > Date.now();
+const isPremium = (guildId) => q.getGuild(guildId).premium_expires_at > Date.now();
+const isLicensed = (guildId) => FREE_GUILDS.includes(guildId) || isPremium(guildId) || q.getGuild(guildId).expires_at > Date.now();
 
 function makeKey() {
   const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
@@ -98,7 +105,9 @@ function panelPayload(guild) {
 const licenseText = (gid) => {
   if (FREE_GUILDS.includes(gid)) return '♾️ 무제한';
   const exp = q.getGuild(gid).expires_at;
-  return exp > Date.now() ? `✅ ${ts(exp)} 까지` : '⛔ 만료 / 미등록';
+  const prem = q.getGuild(gid).premium_expires_at;
+  if (prem > Date.now()) return `👑 프리미엄 ${ts(prem)} 까지`;
+  return exp > Date.now() ? `✅ 일반 ${ts(exp)} 까지` : '⛔ 만료 / 미등록';
 };
 
 const admin = makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload, licenseText });
@@ -111,6 +120,10 @@ client.on('interactionCreate', async (i) => {
     if (i.isModalSubmit() && i.customId.startsWith('rvm:')) return await reviewSubmit(i);
 
     if (!i.guild) return;
+    // 슬롯 명령/모달은 슬롯 핸들러에서만 처리해 중복 응답을 방지합니다.
+    if (slotBot && i.guildId === slotBot.guildId &&
+        ((i.isChatInputCommand() && slotBot.commandNames.includes(i.commandName)) ||
+         (i.isModalSubmit() && i.customId.startsWith('slotname:')))) return;
 
     if (i.isChatInputCommand() && ['라이센스등록', '라이센스확인', '라이센스생성', '라이센스목록'].includes(i.commandName)) {
       return await handleLicenseCmd(i);
@@ -604,9 +617,10 @@ async function handleModal(i) {
     if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인 전용이에요.', ...EPH });
     const pid = Number(i.customId.split(':')[1]);
     const lines = i.fields.getTextInputValue('lines').split('\n').map((s) => s.trim()).filter(Boolean);
-    const ins = db.prepare('INSERT INTO stock (product_id, content) VALUES (?, ?)');
-    db.transaction(() => lines.forEach((l) => ins.run(pid, l)))();
-    return i.reply({ content: `✅ 재고 **${lines.length}개** 추가했어요.`, ...EPH });
+    const result = addStock(gid, pid, i.user.id, lines);
+    if (result.err) return i.reply({ content: `❌ ${result.err}`, ...EPH });
+    await stockLog(i.guild, i.user.id, result);
+    return i.reply({ content: `✅ 재고 **${result.quantity}개** 추가했어요. (현재 재고 ${result.after}개)`, ...EPH });
   }
 
   if (i.customId === 'charge_form') {
@@ -675,6 +689,23 @@ async function handleChargeDecision(i) {
     : `❌ [${guild.name}] 충전 신청(#${c.id}, ${won(c.amount)})이 거절됐어요. 문의는 서버 주인에게 해주세요.`).catch(() => {});
 }
 
+async function stockLog(guild, actorId, result) {
+  const channelId = q.getGuild(guild.id).stock_log_channel;
+  if (!channelId) return;
+  try {
+    const channel = await guild.channels.fetch(channelId);
+    if (!channel?.isTextBased()) return;
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('📥 자판기 재고 추가 로그')
+      .addFields(
+        { name: '상품', value: `#${result.product.id} ${result.product.name}`.slice(0,1024) },
+        { name: '상품 가격', value: won(result.product.price), inline: true },
+        { name: '추가 수량', value: `${result.quantity}개`, inline: true },
+        { name: '추가 후 재고', value: `${result.after}개`, inline: true },
+        { name: '추가 관리자', value: `<@${actorId}>` }
+      ).setTimestamp()] });
+  } catch (err) { console.warn('재고 로그 전송 실패:', err.message); }
+}
+
 /* ───────────── 라이센스 ───────────── */
 async function handleLicenseCmd(i) {
   switch (i.commandName) {
@@ -682,28 +713,32 @@ async function handleLicenseCmd(i) {
       if (!isMaster(i.user.id)) return i.reply({ content: '🚫 봇 판매자만 사용할 수 있어요.', ...EPH });
       const days = i.options.getInteger('기간');
       const n = i.options.getInteger('개수') || 1;
-      const ins = db.prepare('INSERT INTO licenses (key, days, created_at) VALUES (?,?,?)');
+      const tier = i.options.getString('등급');
+      const ins = db.prepare('INSERT INTO licenses (key, days, created_at, tier) VALUES (?,?,?,?)');
       const keys = [];
-      db.transaction(() => { for (let k = 0; k < n; k++) { const key = makeKey(); ins.run(key, days, Date.now()); keys.push(key); } })();
-      return i.reply({ content: `🔑 **${days}일** 라이센스 ${n}개 생성\n\`\`\`\n${keys.join('\n')}\n\`\`\``, ...EPH });
+      db.transaction(() => { for (let k = 0; k < n; k++) { const key = tier === 'premium' ? makeKey().replace(/^\w+-/, 'PREM-') : makeKey(); ins.run(key, days, Date.now(), tier); keys.push(key); } })();
+      return i.reply({ content: `🔑 **${tier === 'premium' ? '프리미엄' : '일반'} ${days}일** 라이센스 ${n}개 생성\n\`\`\`\n${keys.join('\n')}\n\`\`\``, ...EPH });
     }
     case '라이센스목록': {
       if (!isMaster(i.user.id)) return i.reply({ content: '🚫 봇 판매자만 사용할 수 있어요.', ...EPH });
       const rows = db.prepare('SELECT * FROM licenses WHERE used_guild IS NULL ORDER BY created_at DESC LIMIT 30').all();
-      return i.reply({ content: rows.length ? `미사용 라이센스 (최근 30개)\n\`\`\`\n${rows.map((r) => `${r.key}  ${r.days}일`).join('\n')}\n\`\`\`` : '미사용 라이센스가 없어요.', ...EPH });
+      return i.reply({ content: rows.length ? `미사용 라이센스 (최근 30개)\n\`\`\`\n${rows.map((r) => `${r.key}  ${r.tier === 'premium' ? '프리미엄' : '일반'} ${r.days}일`).join('\n')}\n\`\`\`` : '미사용 라이센스가 없어요.', ...EPH });
     }
     case '라이센스등록': {
       if (!isOwner(i)) return i.reply({ content: '🚫 서버 주인만 등록할 수 있어요.', ...EPH });
       const res = redeemLicense(i.options.getString('키').trim().toUpperCase(), i.guildId);
       if (res.err) return i.reply({ content: `❌ ${res.err}`, ...EPH });
-      return i.reply({ content: `✅ **${res.days}일** 라이센스 등록 완료!\n만료일: ${ts(res.expires)}`, ...EPH });
+      return i.reply({ content: `✅ **${res.tier === 'premium' ? '프리미엄' : '일반'} ${res.days}일** 라이센스 등록 완료!\n만료일: ${ts(res.expires)}`, ...EPH });
     }
     case '라이센스확인': {
       if (FREE_GUILDS.includes(i.guildId)) return i.reply({ content: '♾️ 이 서버는 무제한 이용 서버예요.', ...EPH });
       const g = q.getGuild(i.guildId);
-      return i.reply({ content: g.expires_at > Date.now() ? `✅ 이용 가능 — 만료일 ${ts(g.expires_at)}` : '⛔ 라이센스가 없거나 만료되었어요.', ...EPH });
+      const standard = g.expires_at > Date.now() ? `일반: ${ts(g.expires_at)}` : '일반: 만료 / 미등록';
+      const premium = g.premium_expires_at > Date.now() ? `프리미엄(슬롯 포함): ${ts(g.premium_expires_at)}` : '프리미엄: 만료 / 미등록';
+      return i.reply({ content: `🔑 라이센스 현황\n${standard}\n${premium}`, ...EPH });
     }
   }
 }
 
+if (!TOKEN) throw new Error('TOKEN 환경 변수를 설정하세요.');
 client.login(TOKEN);
