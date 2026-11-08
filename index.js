@@ -56,14 +56,25 @@ const commands = [
   new SlashCommandBuilder().setName('관리').setDescription('자판기 관리 패널 열기 (서버 주인 전용)'),
 ].map((c) => c.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   await client.application.commands.set(commands);
   for (const guild of client.guilds.cache.values()) {
     if (slotBot && guild.id === slotBot.guildId) continue;
     await guild.commands.set([]).catch((e) => console.warn(`길드 명령어 정리 실패 (${guild.name}):`, e.message));
   }
-  if (slotBot) await slotBot.ready();
+  if (slotBot) {
+    try { await slotBot.ready(); }
+    catch (e) { console.error('[슬롯] 초기화 실패 (자판기는 계속 실행):', e); }
+  }
   console.log(`✅ 통합 봇 로그인: ${client.user.tag}`);
+});
+
+// 나중에 슬롯 서버에 봇을 초대하면 명령어를 자동 등록합니다.
+client.on('guildCreate', async guild => {
+  if (slotBot && guild.id === slotBot.guildId) {
+    try { await slotBot.ready(); }
+    catch (e) { console.error('[슬롯] 신규 서버 초기화 실패:', e); }
+  }
 });
 
 /* ───────────── 유틸 ───────────── */

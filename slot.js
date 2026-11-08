@@ -273,15 +273,30 @@ async function startOrder(interaction, categoryKey, channelName, targetChannelId
   await interaction.editReply({ embeds: [embed] });
 }
 
+let slotLoopsStarted = false;
 async function ready() {
   initDb();
-  const guild = await client.guilds.fetch(config.guildId);
-  await guild.commands.set(commands.map(c => c.toJSON()));
-  console.log("✅ 슬롯 명령어 등록 완료");
-  setInterval(() => expireSlots().catch(console.error), 60 * 1000);
-  setInterval(() => expireOrders().catch(console.error), 60 * 1000);
-  await expireOrders();
-  await expireSlots();
+  // DiscordAPIError[10004] (Unknown Guild) must not crash the vending bot.
+  const guild = client.guilds.cache.get(config.guildId);
+  if (!guild) {
+    console.warn(`[슬롯] 서버 ${config.guildId}에 봇이 참여하지 않았습니다. 슬롯 명령어 등록을 보류합니다. 동일한 봇을 슬롯 서버에 초대해 주세요.`);
+    return false;
+  }
+  try {
+    await guild.commands.set(commands.map(c => c.toJSON()));
+    console.log(`[슬롯] ${guild.name} (${guild.id}) 명령어 등록 완료`);
+  } catch (error) {
+    console.error(`[슬롯] 명령어 등록 실패: ${error.message}`);
+    return false;
+  }
+  if (!slotLoopsStarted) {
+    slotLoopsStarted = true;
+    setInterval(() => expireSlots().catch(console.error), 60 * 1000);
+    setInterval(() => expireOrders().catch(console.error), 60 * 1000);
+  }
+  await expireOrders().catch(e => console.error('[슬롯] 주문 만료 검사 실패:', e));
+  await expireSlots().catch(e => console.error('[슬롯] 슬롯 만료 검사 실패:', e));
+  return true;
 }
 async function expireOrders() {
   query("UPDATE slot_orders SET status='expired' WHERE status='pending' AND expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
