@@ -4,6 +4,7 @@ const {
   PermissionFlagsBits, ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const { db, q, redeemLicense, addStock } = require('./db');
+const { sendStockLog, defaults: stockLogDefaults } = require('./stock-log');
 
 module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload, licenseText }) {
   const row = (...c) => new ActionRowBuilder().addComponents(...c);
@@ -71,6 +72,7 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
           btn('adm_review', '후기 채널(DM 안내)', '✍️'),
           btn('adm_chglog', '충전 로그 채널', '💳'),
           btn('adm_stocklog', '재고 로그 채널', '📥'),
+          btn('adm_stockformat', '재고 로그 문구', '📝'),
         ),
       ],
     };
@@ -225,6 +227,14 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         case 'adm_chglogclear':
           db.prepare("UPDATE guilds SET charge_log_channel = '' WHERE guild_id = ?").run(gid);
           return i.update({ content: '🔕 충전 로그를 껐어요.', components: [] });
+
+        case 'adm_stockformat': {
+          const g = q.getGuild(gid);
+          return i.showModal(modal('adm_m_stockformat', '재고 추가 로그 문구 설정',
+            ti('title', '로그 제목', TextInputStyle.Short, { max: 200, value: g.stock_log_title || stockLogDefaults.title }),
+            ti('message', '로그 내용 (변수 사용 가능)', TextInputStyle.Paragraph, { max: 1900, value: g.stock_log_message || stockLogDefaults.message })
+          ));
+        }
 
         case 'adm_stocklog':
           return i.reply({
@@ -402,21 +412,21 @@ module.exports = function makeAdmin({ won, ts, EPH, isOwner, panelPayload, clock
         return i.reply({ content: `✅ 상품 정보(이름, 가격, 링크 필수 여부)가 수정되었습니다!`, ...EPH });
       }
 
+      if (id === 'adm_m_stockformat') {
+        const title = i.fields.getTextInputValue('title').trim();
+        const message = i.fields.getTextInputValue('message').trim();
+        if (!title || !message) return i.reply({ content: '제목과 내용을 입력해 주세요.', ...EPH });
+        db.prepare('UPDATE guilds SET stock_log_title=?, stock_log_message=? WHERE guild_id=?').run(title, message, gid);
+        return i.reply({ content: '✅ 재고 로그 문구를 저장했어요. 사용 가능 변수: `{상품}` `{가격}` `{추가수량}` `{현재재고}` `{관리자}` `{시간}`', ...EPH });
+      }
+
       if (id.startsWith('adm_m_stock:')) {
         const p = getProduct(gid, id.split(':')[1]);
         if (!p) return i.reply({ content: '❌ 없는 상품이에요.', ...EPH });
         const lines = i.fields.getTextInputValue('lines').split('\n').map((s) => s.trim()).filter(Boolean);
         const result = addStock(gid, p.id, i.user.id, lines);
         if (result.err) return i.reply({ content: `❌ ${result.err}`, ...EPH });
-        const embed = new EmbedBuilder().setColor(0x57f287).setTitle('📥 자판기 재고 추가 로그')
-          .addFields(
-            { name: '상품', value: `#${p.id} ${p.name}`.slice(0,1024) },
-            { name: '상품 가격', value: won(result.product.price), inline: true },
-            { name: '추가 수량', value: `${result.quantity}개`, inline: true },
-            { name: '추가 후 재고', value: `${result.after}개`, inline: true },
-            { name: '추가 관리자', value: `<@${i.user.id}>` }
-          ).setTimestamp();
-        await log(i.guild, embed, 'stock_log_channel');
+        await sendStockLog(i.guild, i.user.id, result);
         return i.reply({ content: `✅ **${p.name}** 재고 **${result.quantity}개** 추가했어요. (현재 ${result.after}개)`, ...EPH });
       }
 

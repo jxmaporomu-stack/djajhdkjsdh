@@ -7,6 +7,7 @@ const {
 } = require('discord.js');
 const { db, q, buy, approveCharge, rejectCharge, redeemLicense, addStock } = require('./db');
 const makeAdmin = require('./admin');
+const { sendStockLog } = require('./stock-log');
 
 const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
 const FREE_GUILDS = (process.env.FREE_GUILD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -136,7 +137,9 @@ client.on('interactionCreate', async (i) => {
     // 슬롯 명령/모달은 슬롯 핸들러에서만 처리해 중복 응답을 방지합니다.
     if (slotBot && i.guildId === slotBot.guildId &&
         ((i.isChatInputCommand() && slotBot.commandNames.includes(i.commandName)) ||
-         (i.isModalSubmit() && i.customId.startsWith('slotname:')))) return;
+         (i.isModalSubmit() && (i.customId.startsWith('slotname:') || i.customId === 'slot:txmodal')) ||
+         (i.isButton() && i.customId.startsWith('slot:')) ||
+         (i.isStringSelectMenu() && i.customId.startsWith('slot:')))) return;
 
     if (i.isChatInputCommand() && ['라이센스등록', '라이센스확인', '라이센스생성', '라이센스목록'].includes(i.commandName)) {
       return await handleLicenseCmd(i);
@@ -637,7 +640,7 @@ async function handleModal(i) {
     const lines = i.fields.getTextInputValue('lines').split('\n').map((s) => s.trim()).filter(Boolean);
     const result = addStock(gid, pid, i.user.id, lines);
     if (result.err) return i.reply({ content: `❌ ${result.err}`, ...EPH });
-    await stockLog(i.guild, i.user.id, result);
+    await sendStockLog(i.guild, i.user.id, result);
     return i.reply({ content: `✅ 재고 **${result.quantity}개** 추가했어요. (현재 재고 ${result.after}개)`, ...EPH });
   }
 
@@ -705,23 +708,6 @@ async function handleChargeDecision(i) {
   client.users.send(c.user_id, approve
     ? `✅ [${guild.name}] 충전 **${won(c.amount)}** 이 승인됐어요! 현재 잔액 ${won(bal)}`
     : `❌ [${guild.name}] 충전 신청(#${c.id}, ${won(c.amount)})이 거절됐어요. 문의는 서버 주인에게 해주세요.`).catch(() => {});
-}
-
-async function stockLog(guild, actorId, result) {
-  const channelId = q.getGuild(guild.id).stock_log_channel;
-  if (!channelId) return;
-  try {
-    const channel = await guild.channels.fetch(channelId);
-    if (!channel?.isTextBased()) return;
-    await channel.send({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('📥 자판기 재고 추가 로그')
-      .addFields(
-        { name: '상품', value: `#${result.product.id} ${result.product.name}`.slice(0,1024) },
-        { name: '상품 가격', value: won(result.product.price), inline: true },
-        { name: '추가 수량', value: `${result.quantity}개`, inline: true },
-        { name: '추가 후 재고', value: `${result.after}개`, inline: true },
-        { name: '추가 관리자', value: `<@${actorId}>` }
-      ).setTimestamp()] });
-  } catch (err) { console.warn('재고 로그 전송 실패:', err.message); }
 }
 
 /* ───────────── 라이센스 ───────────── */

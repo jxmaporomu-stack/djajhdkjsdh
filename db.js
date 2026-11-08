@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS attendance (
 
 // 기존 DB에 새 설정 컬럼 및 상품 테이블 컬럼 추가
 const guildCols = db.prepare('PRAGMA table_info(guilds)').all().map((c) => c.name);
-for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text', 'buyer_role', 'review_channel', 'charge_log_channel', 'stock_log_channel']) {
+for (const col of ['log_channel', 'panel_title', 'panel_color', 'footer_text', 'buyer_role', 'review_channel', 'charge_log_channel', 'stock_log_channel', 'stock_log_title', 'stock_log_message']) {
   if (!guildCols.includes(col)) db.exec(`ALTER TABLE guilds ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
 }
 
