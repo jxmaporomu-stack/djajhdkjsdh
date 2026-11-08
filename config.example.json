@@ -1,6 +1,8 @@
 {
   "guildId": "DISCORD_SERVER_ID",
-  "adminRoleIds": ["ADMIN_ROLE_ID"],
+  "adminRoleIds": [
+    "ADMIN_ROLE_ID"
+  ],
   "ltcAddress": "YOUR_LITECOIN_RECEIVING_ADDRESS",
   "minConfirmations": 1,
   "paymentExpiryMinutes": 30,
@@ -9,23 +11,43 @@
   "blockExplorerApi": "https://litecoinspace.org/api",
   "categories": [
     {
-      "key": "normal",
-      "label": "일반 슬롯",
+      "key": "normal-week",
+      "label": "일반 슬롯 (7일)",
       "emoji": "🛒",
       "prefix": "🛒・",
-      "priceLtc": "0.01000000",
+      "priceUsd": 2,
+      "durationDays": 7,
+      "baseCategoryId": "DISCORD_CATEGORY_ID",
+      "maxChannels": 50
+    },
+    {
+      "key": "normal-month",
+      "label": "일반 슬롯 (30일)",
+      "emoji": "🛒",
+      "prefix": "🛒・",
+      "priceUsd": 4,
       "durationDays": 30,
       "baseCategoryId": "DISCORD_CATEGORY_ID",
       "maxChannels": 50
     },
     {
-      "key": "vip",
-      "label": "VIP 슬롯",
+      "key": "vip-week",
+      "label": "VIP 슬롯 (7일)",
       "emoji": "💎",
       "prefix": "💎・",
-      "priceLtc": "0.02000000",
+      "priceUsd": 2,
+      "durationDays": 7,
+      "baseCategoryId": "DISCORD_CATEGORY_ID",
+      "maxChannels": 50
+    },
+    {
+      "key": "vip-month",
+      "label": "VIP 슬롯 (30일)",
+      "emoji": "💎",
+      "prefix": "💎・",
+      "priceUsd": 4,
       "durationDays": 30,
-      "baseCategoryId": "ANOTHER_DISCORD_CATEGORY_ID",
+      "baseCategoryId": "DISCORD_CATEGORY_ID",
       "maxChannels": 50
     }
   ]

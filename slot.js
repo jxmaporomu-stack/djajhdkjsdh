@@ -38,6 +38,46 @@ const moneyToSats = (ltc) => {
   return BigInt(Math.round(n * 1e8));
 };
 const satsToLtc = (sats) => (Number(sats) / 1e8).toFixed(8);
+
+// USD 고정 판매가를 주문 생성 시 LTC로 환산합니다. 시세 조회에 실패하면 주문을 생성하지 않습니다.
+let cachedLtcUsd = null;
+let lastRateAt = 0;
+async function fetchLtcUsd() {
+  if (cachedLtcUsd && Date.now() - lastRateAt < 60000) return cachedLtcUsd;
+  const providers = [
+    async () => {
+      const r = await fetch('https://api.coinbase.com/v2/prices/LTC-USD/spot', { signal: AbortSignal.timeout(7000) });
+      if (!r.ok) throw new Error(`Coinbase ${r.status}`);
+      const j = await r.json();
+      return Number(j?.data?.amount);
+    },
+    async () => {
+      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd', { signal: AbortSignal.timeout(7000) });
+      if (!r.ok) throw new Error(`CoinGecko ${r.status}`);
+      const j = await r.json();
+      return Number(j?.litecoin?.usd);
+    }
+  ];
+  for (const provider of providers) {
+    try {
+      const rate = await provider();
+      if (!Number.isFinite(rate) || rate <= 0) throw new Error('유효하지 않은 시세');
+      cachedLtcUsd = rate;
+      lastRateAt = Date.now();
+      return rate;
+    } catch (error) { console.warn('LTC/USD 시세 조회 실패:', error.message); }
+  }
+  throw new Error('현재 LTC 시세를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.');
+}
+async function categoryQuote(category) {
+  const usd = Number(category.priceUsd);
+  if (!Number.isFinite(usd) || usd <= 0) throw new Error('슬롯 USD 가격 설정이 올바르지 않습니다.');
+  const rate = await fetchLtcUsd();
+  // 실제 청구 LTC를 소수점 8자리(1 satoshi)까지 반올림합니다.
+  const sats = BigInt(Math.max(1, Math.round(usd / rate * 1e8)));
+  return { usd, rate, sats };
+}
+
 const safeName = (s) => s.toLowerCase().replace(/[^a-z0-9가-힣_-]/gi, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 70) || "slot";
 const isAdmin = (member) => {
   if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
@@ -207,7 +247,7 @@ const commands = [
     .addStringOption(o => o.setName("키").setDescription("영문 고유 키 (예: vip)").setRequired(true))
     .addStringOption(o => o.setName("이름").setDescription("상점에 표시할 이름").setRequired(true))
     .addStringOption(o => o.setName("접두사").setDescription("채널명 앞부분 (예: 💎・)").setRequired(true))
-    .addStringOption(o => o.setName("가격").setDescription("LTC 가격 (예: 0.01)").setRequired(true))
+    .addNumberOption(o => o.setName("가격usd").setDescription("USD 가격 (예: 2 또는 4)").setMinValue(0.01).setRequired(true))
     .addIntegerOption(o => o.setName("기간일").setDescription("이용 기간(일)").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("기준카테고리id").setDescription("Discord 카테고리 ID").setRequired(true)),
   new SlashCommandBuilder().setName("슬롯삭제").setDescription("관리자: 슬롯 채널을 삭제하고 권한을 회수합니다.")
@@ -218,7 +258,8 @@ const commands = [
 async function startOrder(interaction, categoryKey, channelName, targetChannelId = null) {
   const category = getCategory(categoryKey);
   if (!category) return interaction.reply({ content: "해당 상품을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
-  const sats = moneyToSats(category.priceLtc);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const { usd, rate, sats } = await categoryQuote(category);
   const expiry = new Date(Date.now() + Number(config.paymentExpiryMinutes || 30) * 60000);
   const result = query(
     `INSERT INTO slot_orders (guild_id,user_id,category_key,channel_name,expected_sats,duration_days,expires_at,target_channel_id)
@@ -227,9 +268,9 @@ async function startOrder(interaction, categoryKey, channelName, targetChannelId
   );
   const id = result.rows[0].id;
   const embed = new EmbedBuilder().setTitle("라이트코인 결제 안내")
-    .setDescription(`**상품:** ${category.label}\n**채널명:** ${category.prefix || ""}${safeName(channelName)}\n**기간:** ${category.durationDays}일\n**결제 금액:** \`${satsToLtc(sats)} LTC\`\n**수신 주소:**\n\`${config.ltcAddress}\`\n\n결제 후 \`/txid\` 명령어로 TXID를 제출하세요.\n주문 유효시간: <t:${Math.floor(expiry.getTime()/1000)}:R>`)
+    .setDescription(`**상품:** ${category.label}\n**채널명:** ${category.prefix || ""}${safeName(channelName)}\n**기간:** ${category.durationDays}일\n**판매 가격:** **$${usd.toFixed(2)} USD**\n**결제 금액:** \`${satsToLtc(sats)} LTC\`\n**수신 주소:**\n\`${config.ltcAddress}\`\n\n결제 후 \`/txid\` 명령어로 TXID를 제출하세요.\n주문 유효시간: <t:${Math.floor(expiry.getTime()/1000)}:R>`)
     .setFooter({ text: `주문번호 #${id} | 결제는 지정 주소로 정확한 금액 이상 보내세요.${targetChannelId ? " 기존 슬롯 연장 주문입니다." : ""}` });
-  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+  await interaction.editReply({ embeds: [embed] });
 }
 
 async function ready() {
@@ -271,7 +312,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "슬롯상점") {
         const embed = new EmbedBuilder().setTitle("🛒 슬롯 상점").setDescription(
-          config.categories.map(c => `**${c.emoji || "🛒"} ${c.label}**\n가격: ${c.priceLtc} LTC · 기간: ${c.durationDays}일`).join("\n\n")
+          config.categories.map(c => `**${c.emoji || "🛒"} ${c.label}**\n가격: **$${Number(c.priceUsd).toFixed(2)} USD** · 기간: ${c.durationDays}일\n(LTC 환산액은 주문 시 확인)`).join("\n\n")
         );
         return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       }
@@ -356,12 +397,12 @@ client.on("interactionCreate", async interaction => {
         const next = {
           key, label: interaction.options.getString("이름"),
           prefix: interaction.options.getString("접두사"),
-          priceLtc: interaction.options.getString("가격"),
+          priceUsd: interaction.options.getNumber("가격usd"),
           durationDays: interaction.options.getInteger("기간일"),
           baseCategoryId: interaction.options.getString("기준카테고리id"),
           maxChannels: 50, emoji: old?.emoji || "🛒"
         };
-        moneyToSats(next.priceLtc);
+        if (!Number.isFinite(next.priceUsd) || next.priceUsd <= 0) throw new Error("USD 가격이 올바르지 않습니다.");
         const index = config.categories.findIndex(c => c.key === key);
         if (index >= 0) config.categories[index] = next; else config.categories.push(next);
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
