@@ -136,7 +136,7 @@ function initDb() {
 async function verifyLitecoinTx(txid, expectedSats) {
   if (!/^[a-fA-F0-9]{64}$/.test(txid)) throw new Error("TXID 형식이 올바르지 않습니다.");
   const api = (config.blockExplorerApi || "https://litecoinspace.org/api").replace(/\/$/, "");
-  const response = await fetch(`${api}/tx/${txid.toLowerCase()}`, { headers: { "accept": "application/json" } });
+  const response = await fetch(`${api}/tx/${txid.toLowerCase()}`, { headers: { "accept": "application/json" }, signal: AbortSignal.timeout(15000) });
   if (!response.ok) {
     if (response.status === 404) throw new Error("해당 TXID를 블록체인에서 찾을 수 없습니다.");
     throw new Error(`블록체인 조회 실패 (HTTP ${response.status}). 잠시 후 다시 시도하세요.`);
@@ -146,7 +146,7 @@ async function verifyLitecoinTx(txid, expectedSats) {
   const confirmed = Boolean(status.confirmed);
   let confirmations = 0;
   if (confirmed && Number.isInteger(status.block_height)) {
-    const tipRes = await fetch(`${api}/blocks/tip/height`);
+    const tipRes = await fetch(`${api}/blocks/tip/height`, { signal: AbortSignal.timeout(15000) });
     if (tipRes.ok) {
       const tip = Number(await tipRes.text());
       confirmations = Math.max(0, tip - status.block_height + 1);
@@ -291,7 +291,17 @@ async function extendSlot(interaction, key, lang = 'ko') {
   return startOrder(interaction, key, rows[0].channel_name, rows[0].channel_id, lang);
 }
 async function submitTxid(interaction, txidValue, lang = 'ko') {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  // Discord interactions require an acknowledgement within 3 seconds.
+  // Only the slot handler acknowledges TXID modals (index.js skips all slot:* modals).
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  } catch (error) {
+    if (error.code === 10062 || error.code === 40060) {
+      console.warn(`[슬롯] 만료되었거나 중복 응답된 TXID 상호작용 무시 (${error.code}). TXID를 다시 제출해 주세요.`);
+      return;
+    }
+    throw error;
+  }
   const txid = txidValue.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(txid)) return interaction.editReply(ui(lang, '❌ TXID는 64자리 16진수여야 해요.', '❌ TXID must contain exactly 64 hexadecimal characters.'));
   const { rows } = query("SELECT * FROM slot_orders WHERE guild_id=$1 AND user_id=$2 AND status='pending' AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ORDER BY id DESC LIMIT 1", [interaction.guildId, interaction.user.id]);

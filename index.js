@@ -137,7 +137,7 @@ client.on('interactionCreate', async (i) => {
     // 슬롯 명령/모달은 슬롯 핸들러에서만 처리해 중복 응답을 방지합니다.
     if (slotBot && i.guildId === slotBot.guildId &&
         ((i.isChatInputCommand() && slotBot.commandNames.includes(i.commandName)) ||
-         (i.isModalSubmit() && (i.customId.startsWith('slotname:') || i.customId === 'slot:txmodal')) ||
+         (i.isModalSubmit() && (i.customId.startsWith('slotname:') || i.customId.startsWith('slot:'))) ||
          (i.isButton() && i.customId.startsWith('slot:')) ||
          (i.isStringSelectMenu() && i.customId.startsWith('slot:')))) return;
 
