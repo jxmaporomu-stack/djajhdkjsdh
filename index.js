@@ -8,6 +8,7 @@ const {
 const { db, q, buy, approveCharge, rejectCharge, redeemLicense, addStock } = require('./db');
 const makeAdmin = require('./admin');
 const { sendStockLog } = require('./stock-log');
+const makeTickets = require('./ticket');
 
 const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
 const FREE_GUILDS = (process.env.FREE_GUILD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -18,6 +19,14 @@ const won = (n) => `${Number(n).toLocaleString()}원`;
 const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+// Discord.js EventEmitter의 error 이벤트는 리스너가 없으면 프로세스를 종료시킵니다.
+// 개별 기능의 오류는 각 핸들러에서 처리하며, 이 리스너는 마지막 안전망입니다.
+client.on('error', error => console.error('[Discord 클라이언트 오류]', error));
+client.on('warn', message => console.warn('[Discord 경고]', message));
+process.on('unhandledRejection', reason => {
+  console.error('[처리되지 않은 비동기 오류] 서버는 실행을 유지하지만 관련 작업은 실패했을 수 있습니다:', reason);
+});
+
 // 슬롯 기능은 ENABLE_SLOTS=true일 때 같은 클라이언트에 추가됩니다.
 const slotBot = process.env.ENABLE_SLOTS === 'true' ? require('./slot')(client, { isPremium: gid => q.getGuild(gid).premium_expires_at > Date.now() }) : null;
 
@@ -56,6 +65,9 @@ const commands = [
   new SlashCommandBuilder().setName('출퇴근기록').setDescription('내 출퇴근 기록 확인'),
   new SlashCommandBuilder().setName('관리').setDescription('자판기 관리 패널 열기 (서버 주인 전용)'),
 ].map((c) => c.toJSON());
+
+const tickets = makeTickets({ isLicensed: gid => isLicensed(gid) });
+commands.push(...tickets.commands);
 
 client.once('clientReady', async () => {
   await client.application.commands.set(commands);
@@ -134,6 +146,8 @@ client.on('interactionCreate', async (i) => {
     if (i.isModalSubmit() && i.customId.startsWith('rvm:')) return await reviewSubmit(i);
 
     if (!i.guild) return;
+    // 티켓은 자판기/슬롯 서버 제한과 별개이며 일반 라이센스도 허용합니다.
+    if (tickets.owns(i)) return await tickets.handle(i);
     // 슬롯 명령/모달은 슬롯 핸들러에서만 처리해 중복 응답을 방지합니다.
     if (slotBot && i.guildId === slotBot.guildId &&
         ((i.isChatInputCommand() && slotBot.commandNames.includes(i.commandName)) ||

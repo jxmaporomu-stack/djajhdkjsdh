@@ -422,7 +422,12 @@ async function expireSlots() {
   }
 }
 
-client.on("interactionCreate", async interaction => {
+client.on("interactionCreate", interaction => {
+  void handleSlotInteraction(interaction).catch(error => {
+    console.error('[슬롯] 예기치 못한 상호작용 오류 (최종 보호):', error);
+  });
+});
+async function handleSlotInteraction(interaction) {
   if (interaction.guildId !== config.guildId) return;
   if (interaction.isChatInputCommand() && !commands.some(c => c.name === interaction.commandName)) return;
   const isSlotComponent = (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()) && interaction.customId.startsWith('slot:');
@@ -430,60 +435,60 @@ client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand() && !isSlotComponent && !interaction.isModalSubmit()) return;
   try {
     if (!isPremium(interaction.guildId)) {
-      return interaction.reply({ content: ui(localeFromId(interaction.customId || ''), '👑 슬롯 기능은 프리미엄 라이센스 전용입니다. 서버 주인이 프리미엄 라이센스를 구매한 뒤 `/라이센스등록`으로 등록해야 이용할 수 있습니다.', '👑 Slots require a premium server license. Ask the server owner to purchase one and activate it with `/라이센스등록`.'), flags: MessageFlags.Ephemeral });
+      return await interaction.reply({ content: ui(localeFromId(interaction.customId || ''), '👑 슬롯 기능은 프리미엄 라이센스 전용입니다. 서버 주인이 프리미엄 라이센스를 구매한 뒤 `/라이센스등록`으로 등록해야 이용할 수 있습니다.', '👑 Slots require a premium server license. Ask the server owner to purchase one and activate it with `/라이센스등록`.'), flags: MessageFlags.Ephemeral });
     }
     if (interaction.isButton() && interaction.customId.startsWith('slot:')) {
-      if (interaction.customId.startsWith('slot:lang:')) return interaction.update(slotPanelPayload(localeFromId(interaction.customId)));
+      if (interaction.customId.startsWith('slot:lang:')) return await interaction.update(slotPanelPayload(localeFromId(interaction.customId)));
       const lang = localeFromId(interaction.customId);
-      if (interaction.customId.startsWith('slot:buy:') || interaction.customId === 'slot:buy') return interaction.reply({ content: ui(lang, '🛒 구매할 슬롯을 선택해 주세요.', '🛒 Choose the slot you want to buy.'), components: [categoryMenu('buy', lang)], flags: MessageFlags.Ephemeral });
-      if (interaction.customId.startsWith('slot:extend:') || interaction.customId === 'slot:extend') return interaction.reply({ content: ui(lang, '🔁 연장할 슬롯 종류를 선택해 주세요.', '🔁 Choose a slot type to extend.'), components: [categoryMenu('extend', lang)], flags: MessageFlags.Ephemeral });
-      if (interaction.customId.startsWith('slot:txid:') || interaction.customId === 'slot:txid') return interaction.showModal(txidModal(lang));
-      if (interaction.customId.startsWith('slot:info:') || interaction.customId === 'slot:info') return slotInfo(interaction, lang);
+      if (interaction.customId.startsWith('slot:buy:') || interaction.customId === 'slot:buy') return await interaction.reply({ content: ui(lang, '🛒 구매할 슬롯을 선택해 주세요.', '🛒 Choose the slot you want to buy.'), components: [categoryMenu('buy', lang)], flags: MessageFlags.Ephemeral });
+      if (interaction.customId.startsWith('slot:extend:') || interaction.customId === 'slot:extend') return await interaction.reply({ content: ui(lang, '🔁 연장할 슬롯 종류를 선택해 주세요.', '🔁 Choose a slot type to extend.'), components: [categoryMenu('extend', lang)], flags: MessageFlags.Ephemeral });
+      if (interaction.customId.startsWith('slot:txid:') || interaction.customId === 'slot:txid') return await interaction.showModal(txidModal(lang));
+      if (interaction.customId.startsWith('slot:info:') || interaction.customId === 'slot:info') return await slotInfo(interaction, lang);
     }
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('slot:choose:')) {
       const key = interaction.values[0];
-      if (!getCategory(key)) return interaction.reply({ content: ui(localeFromId(interaction.customId), '존재하지 않는 슬롯 종류입니다.', 'This slot type does not exist.'), flags: MessageFlags.Ephemeral });
+      if (!getCategory(key)) return await interaction.reply({ content: ui(localeFromId(interaction.customId), '존재하지 않는 슬롯 종류입니다.', 'This slot type does not exist.'), flags: MessageFlags.Ephemeral });
       const mode = interaction.customId.split(':')[2];
       const lang = localeFromId(interaction.customId);
-      if (mode === 'extend') return extendSlot(interaction, key, lang);
-      if (mode === 'buy') return interaction.showModal(new ModalBuilder().setCustomId(`slotname:${key}:${lang}`).setTitle(ui(lang, '슬롯 채널 이름', 'Slot Channel Name'))
+      if (mode === 'extend') return await extendSlot(interaction, key, lang);
+      if (mode === 'buy') return await interaction.showModal(new ModalBuilder().setCustomId(`slotname:${key}:${lang}`).setTitle(ui(lang, '슬롯 채널 이름', 'Slot Channel Name'))
         .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('channel_name')
           .setLabel(ui(lang, '원하는 채널명', 'Desired channel name')).setStyle(TextInputStyle.Short).setMinLength(2).setMaxLength(40).setRequired(true))));
     }
     if (interaction.isModalSubmit() && interaction.customId.startsWith('slot:txmodal')) {
-      return submitTxid(interaction, interaction.fields.getTextInputValue('txid'), localeFromId(interaction.customId));
+      return await submitTxid(interaction, interaction.fields.getTextInputValue('txid'), localeFromId(interaction.customId));
     }
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === '슬롯패널' || interaction.commandName === 'slotpanel') {
-        if (!isAdmin(interaction.member)) return interaction.reply({ content: '관리자만 게시할 수 있습니다.', flags: MessageFlags.Ephemeral });
+        if (!isAdmin(interaction.member)) return await interaction.reply({ content: '관리자만 게시할 수 있습니다.', flags: MessageFlags.Ephemeral });
         const lang = interaction.commandName === 'slotpanel' ? 'en' : 'ko';
         await interaction.channel.send(slotPanelPayload(lang));
-        return interaction.reply({ content: ui(lang, '✅ 슬롯 상점 패널을 게시했어요.', '✅ English slot store panel posted.'), flags: MessageFlags.Ephemeral });
+        return await interaction.reply({ content: ui(lang, '✅ 슬롯 상점 패널을 게시했어요.', '✅ English slot store panel posted.'), flags: MessageFlags.Ephemeral });
       }
 
-      if (interaction.commandName === "슬롯상점" || interaction.commandName === "slotstore") return interaction.reply({ ...slotPanelPayload(interaction.commandName === "slotstore" ? "en" : "ko"), flags: MessageFlags.Ephemeral });
+      if (interaction.commandName === "슬롯상점" || interaction.commandName === "slotstore") return await interaction.reply({ ...slotPanelPayload(interaction.commandName === "slotstore" ? "en" : "ko"), flags: MessageFlags.Ephemeral });
       if (interaction.commandName === "슬롯구매" || interaction.commandName === "슬롯연장") {
         const key = interaction.options.getString("카테고리");
         const category = getCategory(key);
-        if (!category) return interaction.reply({ content: "상품을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
+        if (!category) return await interaction.reply({ content: "상품을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
         if (interaction.commandName === "슬롯연장") {
           const { rows } = query(
             "SELECT * FROM slots WHERE guild_id=$1 AND user_id=$2 AND category_key=$3 AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ORDER BY expires_at DESC LIMIT 1",
             [interaction.guildId, interaction.user.id, key]
           );
-          if (!rows.length) return interaction.reply({ content: "해당 카테고리에 연장할 활성 슬롯이 없습니다.", flags: MessageFlags.Ephemeral });
-          return startOrder(interaction, key, rows[0].channel_name, rows[0].channel_id, lang);
+          if (!rows.length) return await interaction.reply({ content: "해당 카테고리에 연장할 활성 슬롯이 없습니다.", flags: MessageFlags.Ephemeral });
+          return await startOrder(interaction, key, rows[0].channel_name, rows[0].channel_id, lang);
         }
         const modal = new ModalBuilder().setCustomId(`slotname:${key}`).setTitle("슬롯 채널 이름");
         const input = new TextInputBuilder().setCustomId("channel_name").setLabel("원하는 채널명").setStyle(TextInputStyle.Short).setMinLength(2).setMaxLength(40).setRequired(true);
         modal.addComponents(new ActionRowBuilder().addComponents(input));
-        return interaction.showModal(modal);
+        return await interaction.showModal(modal);
       }
-      if (interaction.commandName === "txid") return submitTxid(interaction, interaction.options.getString('txid'));
+      if (interaction.commandName === "txid") return await submitTxid(interaction, interaction.options.getString('txid'));
       if (interaction.commandName === "슬롯핑") {
         const { rows: slots } = query("SELECT * FROM slots WHERE guild_id=$1 AND user_id=$2 AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [interaction.guildId, interaction.user.id]);
         const current = slots.find(s => s.channel_id === interaction.channelId);
-        if (!current) return interaction.reply({ content: "본인 슬롯 채널에서만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
+        if (!current) return await interaction.reply({ content: "본인 슬롯 채널에서만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
         const today = new Intl.DateTimeFormat("en-CA", { timeZone: config.timezone || "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
         const { rows } = query(
           `INSERT INTO ping_usage (guild_id,user_id,usage_date,count) VALUES ($1,$2,$3,1)
@@ -491,14 +496,14 @@ client.on("interactionCreate", async interaction => {
            WHERE ping_usage.count < $4 RETURNING count`,
           [interaction.guildId, interaction.user.id, today, Number(config.dailyPingLimit || 3)]
         );
-        if (!rows.length) return interaction.reply({ content: "오늘 사용할 수 있는 @here 핑을 모두 사용했습니다.", flags: MessageFlags.Ephemeral });
+        if (!rows.length) return await interaction.reply({ content: "오늘 사용할 수 있는 @here 핑을 모두 사용했습니다.", flags: MessageFlags.Ephemeral });
         const count = rows[0].count;
         await interaction.reply({ content: `@here\n핑 사용량: ${count}/${Number(config.dailyPingLimit || 3)}`, allowedMentions: { parse: ["everyone"] } });
         return;
       }
-      if (interaction.commandName === "슬롯정보") return slotInfo(interaction);
+      if (interaction.commandName === "슬롯정보") return await slotInfo(interaction);
       if (interaction.commandName === "슬롯카테고리설정") {
-        if (!isAdmin(interaction.member)) return interaction.reply({ content: "관리자만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
+        if (!isAdmin(interaction.member)) return await interaction.reply({ content: "관리자만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
         const key = interaction.options.getString("키");
         const old = getCategory(key);
         const next = {
@@ -513,16 +518,16 @@ client.on("interactionCreate", async interaction => {
         const index = config.categories.findIndex(c => c.key === key);
         if (index >= 0) config.categories[index] = next; else config.categories.push(next);
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-        return interaction.reply({ content: `카테고리 **${next.label}** 설정을 저장했습니다. 봇 재시작 후 상품 목록과 명령어 선택지에 반영됩니다.`, flags: MessageFlags.Ephemeral });
+        return await interaction.reply({ content: `카테고리 **${next.label}** 설정을 저장했습니다. 봇 재시작 후 상품 목록과 명령어 선택지에 반영됩니다.`, flags: MessageFlags.Ephemeral });
       }
       if (interaction.commandName === "슬롯삭제") {
-        if (!isAdmin(interaction.member)) return interaction.reply({ content: "관리자만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
+        if (!isAdmin(interaction.member)) return await interaction.reply({ content: "관리자만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
         const id = interaction.options.getString("채널id");
         const { rows } = query("DELETE FROM slots WHERE channel_id=$1 RETURNING *", [id]);
-        if (!rows.length) return interaction.reply({ content: "해당 슬롯을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
+        if (!rows.length) return await interaction.reply({ content: "해당 슬롯을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
         const ch = await interaction.guild.channels.fetch(id).catch(() => null);
         if (ch) await ch.delete("관리자에 의한 슬롯 회수");
-        return interaction.reply({ content: "슬롯 채널을 삭제하고 이용 권한을 회수했습니다.", flags: MessageFlags.Ephemeral });
+        return await interaction.reply({ content: "슬롯 채널을 삭제하고 이용 권한을 회수했습니다.", flags: MessageFlags.Ephemeral });
       }
     }
 
@@ -531,13 +536,30 @@ client.on("interactionCreate", async interaction => {
       const lang = localeFromId(interaction.customId);
       const channelName = interaction.fields.getTextInputValue("channel_name").trim();
       if (!/^[\p{L}\p{N} _-]{2,40}$/u.test(channelName)) {
-        return interaction.reply({ content: "채널명은 한글/영문/숫자/공백/-/_만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
+        return await interaction.reply({ content: "채널명은 한글/영문/숫자/공백/-/_만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
       }
-      return startOrder(interaction, key, channelName, null, lang);
+      return await startOrder(interaction, key, channelName, null, lang);
     }
   } catch (error) {
-    console.error(error);
-    const message = `처리 중 오류: ${error.message}`;
+    const isTxidError = interaction.isChatInputCommand() && interaction.commandName === 'txid' ||
+      interaction.isModalSubmit() && interaction.customId.startsWith('slot:txmodal');
+    const knownPaymentErrors = [
+      '내 LTC 수신 주소로 결제 금액 이상이 입금된 출력이 없습니다.',
+      'TXID 형식이 올바르지 않습니다.',
+      '해당 TXID를 블록체인에서 찾을 수 없습니다.',
+      '아직 입금 컨펌이 부족합니다.',
+      '이미 사용한 TXID 출력입니다.',
+      '이미 처리되거나 만료된 주문입니다.'
+    ];
+    const expectedPaymentFailure = isTxidError && knownPaymentErrors.some(msg => String(error.message).includes(msg));
+    if (expectedPaymentFailure) {
+      console.warn(`[슬롯 TXID] 결제 검증 거절 (서버=${interaction.guildId}, 사용자=${interaction.user.id}): ${error.message}`);
+    } else {
+      console.error('[슬롯] 상호작용 처리 오류:', error);
+    }
+    const message = expectedPaymentFailure
+      ? `❌ 결제를 확인하지 못했어요. ${error.message}\nLTC 수신 주소·입금액·컨펌 수를 확인한 후 TXID를 다시 제출해 주세요. 오류로 인해 주문이 결제 완료 처리되지는 않았어요.`
+      : '⚠️ 슬롯 처리 중 오류가 발생했어요. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.';
     if (interaction.deferred && !interaction.replied) {
       await interaction.editReply({ content: message }).catch(() => {});
     } else if (interaction.replied) {
@@ -546,7 +568,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply({ content: message, flags: MessageFlags.Ephemeral }).catch(() => {});
     }
   }
-});
+}
 
 return { ready, guildId: config.guildId, commandNames: commands.map(c => c.name) };
 };
