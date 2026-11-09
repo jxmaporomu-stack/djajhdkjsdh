@@ -85,6 +85,45 @@ const isAdmin = (member) => {
 };
 const getCategory = (key) => config.categories.find(c => c.key === key);
 
+// 슬롯 구매자 역할: 결제 완료 후 지급, 마지막 활성 슬롯이 없어지면 회수.
+// 역할 지급 실패는 이미 승인된 결제를 취소하거나 봇 전체를 종료시키지 않습니다.
+async function syncBuyerRole(guild, userId, { removeWhenInactive = true } = {}) {
+  const roleId = config.slotBuyerRoleId;
+  if (!roleId) return { status: 'disabled' };
+  const active = db.prepare("SELECT COUNT(*) AS count FROM slots WHERE guild_id=? AND user_id=? AND expires_at > ?")
+    .get(guild.id, userId, new Date().toISOString()).count > 0;
+  if (!active && !removeWhenInactive) return { status: 'inactive' };
+  try {
+    const role = await guild.roles.fetch(roleId);
+    if (!role) throw new Error(`역할 ID ${roleId} 를 찾을 수 없습니다.`);
+    const member = await guild.members.fetch(userId).catch(e => {
+      if (e.code === 10007 || e.code === 10013) return null;
+      throw e;
+    });
+    if (!member) return { status: 'not_member' };
+    if (active && !member.roles.cache.has(roleId)) {
+      await member.roles.add(role, 'LTC 슬롯 활성 구매자 역할 자동 지급');
+      return { status: 'added' };
+    }
+    if (!active && member.roles.cache.has(roleId)) {
+      await member.roles.remove(role, '마지막 LTC 슬롯 만료/회수');
+      return { status: 'removed' };
+    }
+    return { status: 'unchanged' };
+  } catch (error) {
+    console.error(`[슬롯 역할] 서버=${guild.id} 사용자=${userId} 처리 실패:`, error);
+    return { status: 'failed' };
+  }
+}
+
+async function restoreBuyerRoles(guild) {
+  if (!config.slotBuyerRoleId) return;
+  const users = db.prepare("SELECT DISTINCT user_id FROM slots WHERE guild_id=? AND expires_at > ?")
+    .all(guild.id, new Date().toISOString());
+  for (const user of users) await syncBuyerRole(guild, user.user_id, { removeWhenInactive: false });
+}
+
+
 function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS slot_orders (
@@ -223,6 +262,7 @@ async function createSlotChannel(guild, order) {
     `UPDATE slot_orders SET status='paid', paid_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), channel_id=$1, slot_expires_at=$2 WHERE id=$3`,
     [channel.id, expiresAt, order.id]
   );
+  await syncBuyerRole(guild, order.user_id);
   await channel.send({
     content: `<@${order.user_id}> 슬롯 채널이 생성되었습니다!\n만료 예정: <t:${Math.floor(expiresAt.getTime()/1000)}:F>\nHERE 핑은 \`/슬롯핑\`으로 하루 3회 사용할 수 있습니다.`,
     allowedMentions: { users: [order.user_id] }
@@ -323,6 +363,7 @@ async function submitTxid(interaction, txidValue, lang = 'ko') {
     const newExpiry = new Date(Math.max(Date.now(), oldExpiry.getTime()) + Number(order.duration_days)*86400000);
     query('UPDATE slots SET expires_at=$1 WHERE channel_id=$2', [newExpiry, order.target_channel_id]);
     query("UPDATE slot_orders SET status='paid',paid_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),channel_id=$1,slot_expires_at=$2 WHERE id=$3", [order.target_channel_id, newExpiry, order.id]);
+    await syncBuyerRole(interaction.guild, order.user_id);
     const ch = await interaction.guild.channels.fetch(order.target_channel_id);
     await ch.send(`<@${interaction.user.id}> 슬롯 기간 연장 완료: <t:${Math.floor(newExpiry.getTime()/1000)}:F>`);
     return interaction.editReply(ui(lang, `✅ 결제 확인 완료! ${ch} 슬롯을 연장했어요.`, `✅ Payment confirmed! Extended ${ch}.`));
@@ -353,6 +394,10 @@ const commands = [
     .addNumberOption(o => o.setName("가격usd").setDescription("USD 가격 (예: 2 또는 4)").setMinValue(0.01).setRequired(true))
     .addIntegerOption(o => o.setName("기간일").setDescription("이용 기간(일)").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("기준카테고리id").setDescription("Discord 카테고리 ID").setRequired(true)),
+  new SlashCommandBuilder().setName("슬롯역할설정").setDescription("관리자: 슬롯 구매 완료 시 지급할 역할 설정/조회")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addRoleOption(o => o.setName("역할").setDescription("자동 지급할 구매자 역할 (생략 시 현재 설정 확인)"))
+    .addBooleanOption(o => o.setName("해제").setDescription("자동 역할 지급 기능 비활성화")),
   new SlashCommandBuilder().setName("슬롯삭제").setDescription("관리자: 슬롯 채널을 삭제하고 권한을 회수합니다.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addStringOption(o => o.setName("채널id").setDescription("삭제할 슬롯 채널 ID").setRequired(true))
@@ -403,6 +448,7 @@ async function ready() {
   }
   await expireOrders().catch(e => console.error('[슬롯] 주문 만료 검사 실패:', e));
   await expireSlots().catch(e => console.error('[슬롯] 슬롯 만료 검사 실패:', e));
+  await restoreBuyerRoles(guild).catch(e => console.error('[슬롯 역할] 기존 구매자 역할 동기화 실패:', e));
   return true;
 }
 async function expireOrders() {
@@ -416,6 +462,7 @@ async function expireSlots() {
       const channel = await guild.channels.fetch(slot.channel_id).catch(() => null);
       if (channel) await channel.delete("슬롯 이용 기간 만료");
       query("DELETE FROM slots WHERE id=$1", [slot.id]);
+      await syncBuyerRole(guild, slot.user_id);
     } catch (e) {
       console.error("만료 채널 삭제 실패 (다음 검사 때 재시도):", e.message);
     }
@@ -520,6 +567,29 @@ async function handleSlotInteraction(interaction) {
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
         return await interaction.reply({ content: `카테고리 **${next.label}** 설정을 저장했습니다. 봇 재시작 후 상품 목록과 명령어 선택지에 반영됩니다.`, flags: MessageFlags.Ephemeral });
       }
+      if (interaction.commandName === "슬롯역할설정") {
+        if (!isAdmin(interaction.member)) return await interaction.reply({ content: '관리자만 사용할 수 있습니다.', flags: MessageFlags.Ephemeral });
+        const selected = interaction.options.getRole('역할');
+        const clear = interaction.options.getBoolean('해제') === true;
+        if (selected && clear) return await interaction.reply({ content: '역할 지정과 해제를 동시에 선택할 수 없습니다.', flags: MessageFlags.Ephemeral });
+        if (!selected && !clear) return await interaction.reply({ content: config.slotBuyerRoleId ? `현재 슬롯 구매자 역할: <@&${config.slotBuyerRoleId}>` : '아직 슬롯 구매자 역할이 설정되지 않았습니다.', flags: MessageFlags.Ephemeral });
+        if (selected) {
+          if (selected.id === interaction.guild.id || selected.managed) return await interaction.reply({ content: '관리할 수 없는 역할입니다. 일반 역할을 선택해 주세요.', flags: MessageFlags.Ephemeral });
+          const botMember = await interaction.guild.members.fetchMe();
+          if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles) || selected.position >= botMember.roles.highest.position)
+            return await interaction.reply({ content: '봇에 역할 관리 권한을 주고, 봇 역할을 선택한 역할보다 위로 올려주세요.', flags: MessageFlags.Ephemeral });
+        }
+        const previous = config.slotBuyerRoleId || '';
+        config.slotBuyerRoleId = clear ? '' : selected.id;
+        try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2)); }
+        catch (error) {
+          config.slotBuyerRoleId = previous;
+          throw error;
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (selected) await restoreBuyerRoles(interaction.guild);
+        return await interaction.editReply(clear ? '✅ 슬롯 구매자 역할 자동 지급을 비활성화했습니다. 기존 역할은 자동으로 회수하지 않습니다.' : `✅ 슬롯 구매자 역할을 <@&${selected.id}>로 설정했습니다. 기존 활성 슬롯 구매자에게도 지급을 시도했습니다.`);
+      }
       if (interaction.commandName === "슬롯삭제") {
         if (!isAdmin(interaction.member)) return await interaction.reply({ content: "관리자만 사용할 수 있습니다.", flags: MessageFlags.Ephemeral });
         const id = interaction.options.getString("채널id");
@@ -527,6 +597,7 @@ async function handleSlotInteraction(interaction) {
         if (!rows.length) return await interaction.reply({ content: "해당 슬롯을 찾을 수 없습니다.", flags: MessageFlags.Ephemeral });
         const ch = await interaction.guild.channels.fetch(id).catch(() => null);
         if (ch) await ch.delete("관리자에 의한 슬롯 회수");
+        await syncBuyerRole(interaction.guild, rows[0].user_id);
         return await interaction.reply({ content: "슬롯 채널을 삭제하고 이용 권한을 회수했습니다.", flags: MessageFlags.Ephemeral });
       }
     }

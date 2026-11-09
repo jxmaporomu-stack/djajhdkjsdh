@@ -1,6 +1,6 @@
 {
   "name": "discord-vending-slot-combined",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

@@ -50,5 +50,6 @@
       "baseCategoryId": "DISCORD_CATEGORY_ID",
       "maxChannels": 50
     }
-  ]
+  ],
+  "slotBuyerRoleId": ""
 }
