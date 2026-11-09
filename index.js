@@ -12,8 +12,7 @@ const makeTickets = require('./ticket');
 
 const { TOKEN, MASTER_ID, BOT_NAME = '자판기', LICENSE_PREFIX = 'VEND' } = process.env;
 const FREE_GUILDS = (process.env.FREE_GUILD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
-// 자판기 서버는 GUILD_ID(기존 디스호스트 설정)로 지정합니다.
-const VENDING_GUILD_ID = process.env.VENDING_GUILD_ID || process.env.GUILD_ID || '';
+// 자판기/출퇴근은 서버 ID가 아닌 각 서버의 유효한 라이센스로 접근을 제어합니다.
 const EPH = { flags: MessageFlags.Ephemeral };
 const won = (n) => `${Number(n).toLocaleString()}원`;
 const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
@@ -159,11 +158,7 @@ client.on('interactionCreate', async (i) => {
       return await handleLicenseCmd(i);
     }
 
-    // 슬롯 서버에서는 라이센스 명령만 별도 허용하고, 자판기 버튼/명령은 차단합니다.
-    if (VENDING_GUILD_ID && i.guildId !== VENDING_GUILD_ID) {
-      return i.reply({ content: '🛒 자판기 기능은 지정된 자판기 서버에서만 사용할 수 있어요.', ...EPH });
-    }
-
+    // 서버 ID 제한 없음: 일반/프리미엄 라이센스가 유효하면 어느 서버에서나 자판기 사용 가능.
     if (!isLicensed(i.guildId)) {
       return await i.reply({
         content: '⛔ 이 서버의 자판기 라이센스가 만료되었거나 등록되지 않았어요.\n서버 주인이 `/라이센스등록` 으로 키를 등록해 주세요.',
