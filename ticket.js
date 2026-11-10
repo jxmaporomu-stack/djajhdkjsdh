@@ -62,6 +62,7 @@ module.exports = function makeTickets({ isLicensed }) {
     new SlashCommandBuilder().setName('티켓종류삭제').setDescription('서버 주인: 티켓 종류 삭제')
       .addIntegerOption(o => o.setName('번호').setDescription('티켓종류목록에서 확인').setRequired(true)),
     new SlashCommandBuilder().setName('티켓종류목록').setDescription('서버 주인: 등록된 티켓 종류 확인'),
+    new SlashCommandBuilder().setName('티켓관리').setDescription('서버 주인: 버튼과 입력창으로 티켓 서식 설정'),
     new SlashCommandBuilder().setName('티켓닫기').setDescription('현재 티켓을 닫습니다'),
     new SlashCommandBuilder().setName('티켓열기').setDescription('닫힌 티켓을 다시 엽니다 (관리자)'),
     new SlashCommandBuilder().setName('티켓삭제').setDescription('닫힌 티켓 채널을 삭제합니다 (관리자)'),
@@ -74,6 +75,48 @@ module.exports = function makeTickets({ isLicensed }) {
   const getTicket = i => db.prepare('SELECT * FROM tickets WHERE guild_id=? AND channel_id=?').get(i.guildId, i.channelId);
   const getTypes = gid => db.prepare('SELECT * FROM ticket_types WHERE guild_id=? ORDER BY id LIMIT 25').all(gid);
   const error = (i, message) => i.reply({ content: message, ...EPH });
+  const adminOnly = i => i.user.id === i.guild.ownerId;
+  const adminHome = gid => {
+    const types = getTypes(gid);
+    return {
+      embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('⚙️ 티켓 서식 관리')
+        .setDescription('아래 버튼으로 티켓 종류를 만들고, 종류별 **폼 / 인보이스 입력 / 질문**을 수정하세요.\n패널 게시 버튼에서 드롭다운 또는 버튼형을 선택할 수 있어요.')
+        .addFields({ name: `등록된 티켓 종류 (${types.length}/25)`, value: types.length
+          ? types.map(t => `• **#${t.id} ${t.name}** — 폼 ${t.use_form ? 'ON' : 'OFF'}, 인보이스 ${t.require_purchase ? 'ON' : 'OFF'}`).join('\n').slice(0, 1024)
+          : '아직 등록되지 않았어요.' })],
+      components: [row(button('ticket:admin:new', '➕ 종류 추가', ButtonStyle.Success), button('ticket:admin:pick', '✏️ 종류 수정/삭제', ButtonStyle.Primary)),
+        row(button('ticket:admin:panel', '📩 티켓 패널 게시', ButtonStyle.Secondary))],
+    };
+  };
+  const adminModal = (id, title, entries) => new ModalBuilder().setCustomId(id).setTitle(title)
+    .addComponents(entries.map(([key, label, value, required = false]) => {
+      const input = new TextInputBuilder().setCustomId(key).setLabel(label)
+        .setStyle(TextInputStyle.Short).setMaxLength(key === 'questions' ? 300 : 100).setRequired(required);
+      if (value) input.setValue(value);
+      return row(input);
+    }));
+  const typeEditor = type => ({
+    embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`✏️ ${type.name}`)
+      .setDescription(`폼: **${type.use_form ? 'ON' : 'OFF'}**\n인보이스 입력: **${type.require_purchase ? 'ON' : 'OFF'}**\n질문: ${JSON.parse(type.questions).join(' / ') || '없음'}\n\n폼 OFF + 인보이스 ON이면 구매번호만 묻고, 모두 OFF면 즉시 티켓이 열립니다.`)],
+    components: [row(button(`ticket:admin:form:${type.id}`, '폼 ON/OFF', ButtonStyle.Primary),
+      button(`ticket:admin:invoice:${type.id}`, '인보이스 ON/OFF', ButtonStyle.Primary)),
+      row(button(`ticket:admin:questions:${type.id}`, '📝 질문 수정', ButtonStyle.Secondary),
+        button(`ticket:admin:delete:${type.id}`, '🗑️ 종류 삭제', ButtonStyle.Danger)),
+      row(button('ticket:admin:home', '↩ 관리 홈', ButtonStyle.Secondary))],
+  });
+  async function publishPanel(i, title, description, dropdown) {
+    if (!getSettings(i.guildId)) return error(i, '먼저 `/티켓설정`을 실행해 주세요.');
+    const types = getTypes(i.guildId);
+    if (!types.length) return error(i, '먼저 티켓 종류를 추가해 주세요.');
+    const components = dropdown
+      ? [row(new StringSelectMenuBuilder().setCustomId('ticket:type').setPlaceholder('문의 종류를 선택하세요')
+        .addOptions(types.map(t => ({ label: t.name.slice(0, 100), value: String(t.id), description: t.require_purchase ? '인보이스 정보 입력' : '문의 접수' }))))]
+      : Array.from({ length: Math.ceil(types.length / 5) }, (_, n) => row(...types.slice(n * 5, n * 5 + 5)
+        .map(t => button(`ticket:create:${t.id}`, t.name.slice(0, 80), ButtonStyle.Primary))));
+    await i.channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(title || '📩 고객지원 티켓')
+      .setDescription(description || `아래 ${dropdown ? '메뉴' : '버튼'}에서 문의 종류를 선택해 주세요. 비공개 티켓이 생성됩니다.`)], components });
+    return error(i, '✅ 이 채널에 티켓 패널을 게시했어요.');
+  }
 
   async function log(guild, text) {
     const id = getSettings(guild.id)?.log_channel_id;
@@ -195,9 +238,78 @@ module.exports = function makeTickets({ isLicensed }) {
     db.prepare("UPDATE tickets SET status='deleted' WHERE id=?").run(t.id);
     await log(i.guild, `🗑️ 티켓 #${t.id} 삭제 / 처리자 <@${i.user.id}>`);
   }
+  async function handleAdmin(i) {
+    if (!adminOnly(i)) return error(i, '🚫 서버 주인만 티켓 서식을 관리할 수 있어요.');
+    if (i.isModalSubmit()) {
+      if (i.customId === 'ticket:admin:new:save') {
+        if (getTypes(i.guildId).length >= 25) return error(i, '티켓 종류는 최대 25개예요.');
+        const name = i.fields.getTextInputValue('name').trim();
+        const questions = i.fields.getTextInputValue('questions').split('|').map(s => s.trim()).filter(Boolean);
+        if (!name || questions.length > 3 || questions.some(q => q.length > 45)) return error(i, '이름은 필수이고 질문은 최대 3개(각 45자 이내)까지 가능해요.');
+        const result = db.prepare('INSERT INTO ticket_types(guild_id,name,questions,require_purchase,use_form) VALUES (?,?,?,0,1)')
+          .run(i.guildId, name, JSON.stringify(questions));
+        return i.reply({ content: `✅ **${name}** 추가 완료! 아래에서 폼/인보이스 입력을 켜거나 끌 수 있어요.`, ...typeEditor(db.prepare('SELECT * FROM ticket_types WHERE id=?').get(result.lastInsertRowid)), ...EPH });
+      }
+      if (i.customId.startsWith('ticket:admin:questions:save:')) {
+        const id = Number(i.customId.split(':')[4]);
+        const type = db.prepare('SELECT * FROM ticket_types WHERE id=? AND guild_id=?').get(id, i.guildId);
+        if (!type) return error(i, '티켓 종류를 찾지 못했어요.');
+        const questions = i.fields.getTextInputValue('questions').split('|').map(s => s.trim()).filter(Boolean);
+        if (questions.length > (type.require_purchase ? 2 : 3) || questions.some(q => q.length > 45)) return error(i, `질문은 ${type.require_purchase ? 2 : 3}개 이하, 각 45자 이내로 적어 주세요.`);
+        db.prepare('UPDATE ticket_types SET questions=? WHERE id=? AND guild_id=?').run(JSON.stringify(questions), id, i.guildId);
+        return i.reply({ ...typeEditor({ ...type, questions: JSON.stringify(questions) }), ...EPH });
+      }
+      if (i.customId === 'ticket:admin:panel:save') {
+        const mode = i.fields.getTextInputValue('mode').trim().toLowerCase();
+        if (!['드롭다운','버튼','dropdown','button'].includes(mode)) return error(i, '표시방식은 `드롭다운` 또는 `버튼`으로 적어 주세요.');
+        return publishPanel(i, i.fields.getTextInputValue('title').slice(0, 100), i.fields.getTextInputValue('description').slice(0, 2000), ['드롭다운','dropdown'].includes(mode));
+      }
+    }
+    if (i.isStringSelectMenu() && i.customId === 'ticket:admin:select') {
+      const type = db.prepare('SELECT * FROM ticket_types WHERE id=? AND guild_id=?').get(Number(i.values[0]), i.guildId);
+      return i.update(type ? typeEditor(type) : { content: '종류를 찾지 못했어요.', components: [] });
+    }
+    if (!i.isButton()) return;
+    const parts = i.customId.split(':');
+    const action = parts[2];
+    if (action === 'home') return i.update(adminHome(i.guildId));
+    if (action === 'new') return i.showModal(adminModal('ticket:admin:new:save', '티켓 종류 추가', [
+      ['name', '티켓 종류 이름', '', true], ['questions', '입력 질문 (| 구분, 선택)', '']]));
+    if (action === 'panel') return i.showModal(adminModal('ticket:admin:panel:save', '티켓 패널 게시', [
+      ['title', '패널 제목', '📩 고객지원 티켓'], ['description', '안내 문구', '문의 종류를 선택해 주세요.'],
+      ['mode', '표시방식: 드롭다운 또는 버튼', '드롭다운', true]]));
+    if (action === 'pick') {
+      const types = getTypes(i.guildId);
+      if (!types.length) return i.update({ content: '등록된 종류가 없어요. 종류를 먼저 추가하세요.', components: [row(button('ticket:admin:home','↩ 관리 홈',ButtonStyle.Secondary))], embeds: [] });
+      return i.update({ content: '수정할 티켓 종류를 선택하세요.', embeds: [], components: [row(new StringSelectMenuBuilder()
+        .setCustomId('ticket:admin:select').setPlaceholder('티켓 종류 선택').addOptions(types.map(t => ({ label: t.name, value: String(t.id) })))),
+        row(button('ticket:admin:home','↩ 관리 홈',ButtonStyle.Secondary))] });
+    }
+    const id = Number(parts[3]);
+    const type = db.prepare('SELECT * FROM ticket_types WHERE id=? AND guild_id=?').get(id, i.guildId);
+    if (!type) return error(i, '티켓 종류를 찾지 못했어요.');
+    if (action === 'questions') return i.showModal(adminModal(`ticket:admin:questions:save:${id}`, '입력 질문 수정', [
+      ['questions', '질문을 | 로 구분 (비우면 삭제)', JSON.parse(type.questions).join('|')]]));
+    if (action === 'delete') return i.update({ content: `⚠️ **${type.name}** 종류를 삭제할까요?`, embeds: [], components: [row(
+      button(`ticket:admin:confirm:${id}`, '삭제 확정', ButtonStyle.Danger), button('ticket:admin:home', '취소', ButtonStyle.Secondary))] });
+    if (action === 'confirm') {
+      db.prepare('DELETE FROM ticket_types WHERE id=? AND guild_id=?').run(id, i.guildId);
+      return i.update(adminHome(i.guildId));
+    }
+    if (action === 'form' || action === 'invoice') {
+      const nextForm = action === 'form' ? Number(!type.use_form) : type.use_form;
+      const nextInvoice = action === 'invoice' ? Number(!type.require_purchase) : type.require_purchase;
+      if (nextForm && JSON.parse(type.questions).length > (nextInvoice ? 2 : 3)) return error(i, '인보이스 입력 ON일 때 질문은 최대 2개예요. 질문을 먼저 줄여 주세요.');
+      db.prepare('UPDATE ticket_types SET use_form=?,require_purchase=? WHERE id=? AND guild_id=?').run(nextForm,nextInvoice,id,i.guildId);
+      return i.update(typeEditor({ ...type, use_form: nextForm, require_purchase: nextInvoice }));
+    }
+  }
   async function handle(i) {
     if (!i.guild) return;
     if (!isLicensed(i.guildId)) return error(i, '⛔ 일반 또는 프리미엄 라이센스가 필요합니다. `/라이센스등록`으로 등록해 주세요.');
+    if (i.isChatInputCommand() && i.commandName === '티켓관리') return adminOnly(i)
+      ? i.reply({ ...adminHome(i.guildId), ...EPH }) : error(i, '서버 주인 전용이에요.');
+    if ((i.isButton() || i.isModalSubmit() || i.isStringSelectMenu()) && i.customId.startsWith('ticket:admin:')) return handleAdmin(i);
     if (i.isStringSelectMenu() && i.customId === 'ticket:type') return create(i);
     if (i.isButton() && (i.customId === 'ticket:create' || i.customId.startsWith('ticket:create:'))) return create(i);
     if (i.isModalSubmit() && i.customId.startsWith('ticket:submit:')) return submit(i);
