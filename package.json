@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check admin.js && node --check db.js && node --check slot.js && node --check ticket.js"
+    "check": "node --check index.js && node --check admin.js && node --check db.js && node --check slot.js && node --check ticket.js && node --check backup.js && node --check backup-store.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
@@ -12,6 +12,6 @@
     "dotenv": "^16.4.5"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.16.0"
   }
 }

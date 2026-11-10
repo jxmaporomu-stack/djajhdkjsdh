@@ -17,7 +17,7 @@ const EPH = { flags: MessageFlags.Ephemeral };
 const won = (n) => `${Number(n).toLocaleString()}원`;
 const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers] });
 // Discord.js EventEmitter의 error 이벤트는 리스너가 없으면 프로세스를 종료시킵니다.
 // 개별 기능의 오류는 각 핸들러에서 처리하며, 이 리스너는 마지막 안전망입니다.
 client.on('error', error => console.error('[Discord 클라이언트 오류]', error));
@@ -30,6 +30,7 @@ process.on('unhandledRejection', reason => {
 const slotBot = process.env.ENABLE_SLOTS === 'true' ? require('./slot')(client, { isPremium: gid => q.getGuild(gid).premium_expires_at > Date.now() }) : null;
 
 /* ───────────── 슬래시 커맨드 정의 ───────────── */
+const backup = process.env.ENABLE_BACKUP === 'true' ? require('./backup')(client) : null;
 const commands = [
   new SlashCommandBuilder().setName('패널').setDescription('자판기 패널을 이 채널에 올립니다 (서버 주인 전용)'),
   new SlashCommandBuilder().setName('설정').setDescription('계좌 안내 / 이용가이드 문구 설정 (서버 주인 전용)'),
@@ -67,6 +68,7 @@ const commands = [
 
 const tickets = makeTickets({ isLicensed: gid => isLicensed(gid) });
 commands.push(...tickets.commands);
+if (backup) commands.push(...backup.commands);
 
 client.once('clientReady', async () => {
   await client.application.commands.set(commands);
@@ -139,6 +141,7 @@ const admin = makeAdmin({ won, ts, EPH, isOwner, panelPayload, clockPanelPayload
 
 /* ───────────── 메인 핸들러 ───────────── */
 client.on('interactionCreate', async (i) => {
+  if (backup?.handles(i)) return;
   try {
     if (i.isButton() && /^chg_(ok|no):/.test(i.customId)) return await handleChargeDecision(i);
     if (i.isButton() && i.customId.startsWith('rv:')) return await reviewButton(i);
