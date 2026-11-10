@@ -323,7 +323,7 @@ async function handleButton(i) {
       .addFields(
         { name: '보유 잔액', value: won(u.balance), inline: true },
         { name: '누적 사용', value: won(u.total_spent), inline: true },
-        { name: '최근 구매 5건', value: recent.length ? recent.map((r) => `• ${r.product_name} — ${won(r.price)} ${r.server_link ? `(링크: ${r.server_link})` : ''} (${ts(r.created_at)})`).join('\n') : '구매 내역이 없어요.' },
+        { name: '최근 구매 5건', value: recent.length ? recent.map((r) => `• **주문 #${r.id}** ${r.product_name} — ${won(r.price)} ${r.server_link ? `(링크: ${r.server_link})` : ''} (${ts(r.created_at)})`).join('\n') : '구매 내역이 없어요.' },
       );
     return i.reply({ embeds: [embed], ...EPH });
   }
@@ -354,7 +354,7 @@ async function handleButton(i) {
     const res = buy(gid, i.user.id, pid, null);
     if (res.err) return i.update({ content: `❌ ${res.err}`, components: [] });
     await i.update({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, components: [] });
-    i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
+    await sendPurchaseInvoice(i, res);
     await afterPurchase(i, res);
     return;
   }
@@ -428,6 +428,24 @@ async function afterPurchase(i, res) {
     );
     await i.user.send({ embeds: [dm], components: [row] }).catch(() => {});
   }
+}
+
+// 인보이스에는 실제 구매 DB의 확정된 금액을 사용합니다. 재고 원문은 구매자 DM에만 보냅니다.
+async function sendPurchaseInvoice(i, res) {
+  const p = db.prepare('SELECT * FROM purchases WHERE id=? AND guild_id=? AND user_id=?').get(res.purchaseId, i.guildId, i.user.id);
+  if (!p) return;
+  const invoice = new EmbedBuilder().setColor(0x57f287).setTitle(`🧾 INVOICE · #${p.id}`)
+    .addFields(
+      { name: '판매 서버', value: i.guild.name.slice(0, 100) },
+      { name: '구매자', value: `${i.user.username} (${i.user.id})` },
+      { name: '상품', value: p.product_name.slice(0, 1024), inline: true },
+      { name: '결제 금액', value: won(p.price), inline: true },
+      { name: '결제 상태', value: '✅ 결제 완료 (자판기 잔액)' },
+      { name: '구매 일시', value: ts(p.created_at) },
+    ).setFooter({ text: '구매 확인서 · 세금계산서가 아닙니다.' });
+  const delivery = `📦 **상품 지급 · 주문 #${p.id}**\n\`\`\`\n${p.content.replace(/\`/g, 'ˋ').slice(0, 1600)}\n\`\`\``;
+  try { await i.user.send({ embeds: [invoice], content: delivery, allowedMentions: { parse: [] } }); }
+  catch { await i.followUp({ content: '⚠️ DM이 차단되어 인보이스를 보내지 못했어요. DM을 허용해 주세요.', ...EPH }).catch(() => {}); }
 }
 
 /* ───────────── 후기 (구매자 DM 버튼 → 모달 → 후기 채널) ───────────── */
@@ -638,7 +656,7 @@ async function handleModal(i) {
     if (res.err) return i.reply({ content: `❌ ${res.err}`, ...EPH });
 
     await i.reply({ content: `✅ **${res.product.name}** 구매 완료! 남은 잔액 ${won(res.balance)}\n\n지급 내용:\n\`\`\`\n${res.content}\n\`\`\``, ...EPH });
-    i.user.send(`🛒 [${i.guild.name}] **${res.product.name}** 구매 내역\n입력한 서버 링크: ${serverLink}\n\`\`\`\n${res.content}\n\`\`\``).catch(() => {});
+    await sendPurchaseInvoice(i, res);
     await afterPurchase(i, res);
     return;
   }
