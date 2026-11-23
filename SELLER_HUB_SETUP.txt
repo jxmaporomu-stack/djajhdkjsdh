@@ -1,11 +1,18 @@
-SELLER HUB SETUP - QUICK START
+SELLER HUB SETUP - FIXED COMMAND REGISTRATION
 
-1) Upload/extract this complete project to Dischost, replacing the old project files with this integrated copy.
-2) Keep your existing .env / config.json / data.db values. Do not overwrite your real .env with .env.example.
-3) In Discord Developer Portal > Bot > Privileged Gateway Intents, enable Server Members Intent.
-4) Ensure bot invite/role has Manage Channels and Manage Roles, plus View Channels, Send Messages, Embed Links, Read Message History.
-5) Restart the bot and run /setup in the target server as Server Owner or a member with Manage Server.
-6) Assign Global Owner, Co-Owner, and regional Director roles manually to the correct people.
+This build registers /setup as a server-specific (guild) slash command on every
+server the bot is already in, and whenever it joins a new server. This avoids
+waiting for Discord's global slash-command propagation.
 
-Only /setup bypasses the vending license check. Existing vending/slot/ticket behavior remains licensed as before.
-The bot role should be high enough in the role list to manage roles it creates. Leadership roles are intentionally not granted Administrator.
+1) Upload/extract this complete project to Dischost, replacing the old project files.
+2) Keep your existing .env / config.json / data.db values. Do not overwrite your real .env.
+3) Bot permissions required: Manage Channels, Manage Roles, View Channels,
+   Send Messages, Embed Links, Read Message History.
+4) For join/leave notices, enable Server Members Intent in Developer Portal.
+5) Restart the bot. Wait for the console line showing [SELLER HUB] /setup registration.
+6) In the target server, run /setup as the server owner or a member with Manage Server.
+
+Only /setup bypasses the vending license check. Existing vending, ticket, and slot
+commands keep their original license behavior. The bot's role must be above the
+roles it creates/manages. Assign Global Owner, Co-Owner, and regional Director
+roles manually after setup. Leadership roles do not receive Administrator.

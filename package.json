@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check admin.js && node --check db.js && node --check slot.js && node --check ticket.js"
+    "check": "node --check index.js && node --check sellerhub.js && node --check admin.js && node --check db.js && node --check slot.js && node --check ticket.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
