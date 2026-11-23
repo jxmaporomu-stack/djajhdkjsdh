@@ -16,3 +16,7 @@ Only /setup bypasses the vending license check. Existing vending, ticket, and sl
 commands keep their original license behavior. The bot's role must be above the
 roles it creates/manages. Assign Global Owner, Co-Owner, and regional Director
 roles manually after setup. Leadership roles do not receive Administrator.
+
+
+[Setup command registration fix]
+/setup is registered per server without deleting other server-specific slash commands, and is also included in the global command list.

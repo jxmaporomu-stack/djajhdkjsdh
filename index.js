@@ -69,6 +69,8 @@ const commands = [
 
 
 const tickets = makeTickets({ isLicensed: gid => isLicensed(gid) });
+// Keep SELLER HUB /setup in the global payload too, so it is not omitted by commands.set().
+commands.push(sellerHub.data.toJSON());
 commands.push(...tickets.commands);
 
 client.once('clientReady', async () => {
@@ -77,8 +79,11 @@ client.once('clientReady', async () => {
   for (const guild of client.guilds.cache.values()) {
     if (slotBot && guild.id === slotBot.guildId) continue;
     try {
-      await guild.commands.set([sellerHub.data.toJSON()]);
-      console.log(`[SELLER HUB] /setup registered in ${guild.name}`);
+      const existingSetup = await guild.commands.fetch();
+      const setupCommand = existingSetup.find(command => command.name === 'setup');
+      if (setupCommand) await guild.commands.edit(setupCommand.id, sellerHub.data.toJSON());
+      else await guild.commands.create(sellerHub.data.toJSON());
+      console.log(`[SELLER HUB] /setup registered in ${guild.name} (${guild.id})`);
     } catch (e) {
       console.warn(`[SELLER HUB] /setup 등록 실패 (${guild.name}):`, e.message);
     }
@@ -102,8 +107,11 @@ client.once('clientReady', async () => {
 client.on('guildCreate', async guild => {
   // Register /setup immediately for newly joined servers.
   try {
-    await guild.commands.set([sellerHub.data.toJSON()]);
-    console.log(`[SELLER HUB] /setup registered in ${guild.name}`);
+    const existingSetup = await guild.commands.fetch();
+    const setupCommand = existingSetup.find(command => command.name === 'setup');
+    if (setupCommand) await guild.commands.edit(setupCommand.id, sellerHub.data.toJSON());
+    else await guild.commands.create(sellerHub.data.toJSON());
+    console.log(`[SELLER HUB] /setup registered in ${guild.name} (${guild.id})`);
   } catch (e) {
     console.error(`[SELLER HUB] /setup 등록 실패 (${guild.name}):`, e);
   }

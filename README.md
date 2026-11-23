@@ -217,3 +217,7 @@ The command is safe to rerun: it checks for matching categories and channels and
 
 ### License behavior
 Only the `/setup` utility bypasses the vending license check. Existing vending, attendance, slot, and other licensed features keep their original license behavior.
+
+
+[Setup command registration fix]
+/setup is registered per server without deleting other server-specific slash commands, and is also included in the global command list.

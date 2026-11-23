@@ -308,9 +308,12 @@ async function execute(interaction) {
     const guild = interaction.guild;
     const me = await guild.members.fetchMe();
 
-    if (!me.permissions.has(P.ManageChannels) || !me.permissions.has(P.ManageRoles)) {
+    const missing = [];
+    if (!me.permissions.has(P.ManageChannels)) missing.push('Manage Channels');
+    if (!me.permissions.has(P.ManageRoles)) missing.push('Manage Roles');
+    if (missing.length) {
       return interaction.editReply(
-        '❌ The bot needs **Manage Channels** and **Manage Roles** permissions.'
+        `❌ 봇에 다음 권한이 필요합니다: **${missing.join(', ')}**. 봇 역할에 권한을 부여하고 역할 목록에서 봇 역할을 충분히 위로 올린 뒤 다시 실행하세요.`
       );
     }
 
