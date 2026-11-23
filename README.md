@@ -184,3 +184,36 @@
 - 슬롯 기능은 **config.json의 guildId 서버**에서만 실행되며, **프리미엄 라이센스**가 필요합니다. 기존 슬롯 구매/역할 기능은 변경하지 않았습니다.
 - 기존 `.env`, `config.json`, `data.db`는 그대로 유지하고 코드만 교체하세요. 이전 `GUILD_ID`/`VENDING_GUILD_ID` 값이 남아 있어도 이제 자판기 접근을 제한하지 않습니다.
 - Node.js 20+ 권장. 디스호스트에서 재시작 후 `/라이센스확인`과 `/관리`를 확인하세요.
+
+
+---
+
+## SELLER HUB one-time server builder
+
+This project includes a one-time `/setup` command for creating the SELLER HUB global network layout. It is intentionally handled before the vending-machine license check, so `/setup` does **not** require a vending license.
+
+### What `/setup` creates
+- 13 categories and their text channels, including Welcome, Announcements, Global Network, Asia, Americas, Europe, Marketplace, Middleman, Trust, Scam Alerts, Support, and private Staff channels.
+- Roles: Global Owner, Co-Owner, Network Admin, Asia Director, Americas Director, Europe Director, Cell Server Owner, Regional Admin, Regional Moderator, Support, Verified Trader, Member, and Muted.
+- Read-only announcement channels for regular members.
+- Regional Director posting permissions limited to their own region's regional announcement category.
+- Private Staff Only category.
+- Automatic join and leave messages in `#join` and `#leave`.
+
+### Required Discord setup
+1. In Discord Developer Portal, open the bot application → Bot → Privileged Gateway Intents.
+2. Enable **Server Members Intent** (required for join/leave notices).
+3. Invite the bot with `bot` and `applications.commands` scopes.
+4. Give the bot **Manage Channels** and **Manage Roles** permissions. It also needs View Channels, Send Messages, Embed Links, and Read Message History.
+5. Move the bot's own role above the roles it creates or manages, if Discord role hierarchy prevents changes.
+6. Restart the bot. The global `/setup` command is registered with the other application commands.
+7. Run `/setup` in the target server as the server owner or a member with **Manage Server** permission.
+
+### Important role assignment
+`/setup` creates the roles but does not assign people to them. The server owner should manually assign Global Owner / Co-Owner / regional Director roles to the appropriate people. Do not give `Administrator` to every regional role. The generated leadership roles intentionally have no server-wide administrative permissions; their authority is limited to the configured announcement channels. Discord server ownership remains separate from these roles.
+
+### One-time use and existing channels
+The command is safe to rerun: it checks for matching categories and channels and skips channel creation when they already exist. Existing matching category permission overwrites are updated to the SELLER HUB layout, and child text channels inherit those category permissions. Review any existing categories with the same names before running the command.
+
+### License behavior
+Only the `/setup` utility bypasses the vending license check. Existing vending, attendance, slot, and other licensed features keep their original license behavior.

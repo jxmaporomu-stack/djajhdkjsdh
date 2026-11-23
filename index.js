@@ -17,7 +17,9 @@ const EPH = { flags: MessageFlags.Ephemeral };
 const won = (n) => `${Number(n).toLocaleString()}원`;
 const ts = (ms) => `<t:${Math.floor(ms / 1000)}:F>`;
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers] });
+const sellerHub = require('./sellerhub');
+sellerHub.installEvents(client);
 // Discord.js EventEmitter의 error 이벤트는 리스너가 없으면 프로세스를 종료시킵니다.
 // 개별 기능의 오류는 각 핸들러에서 처리하며, 이 리스너는 마지막 안전망입니다.
 client.on('error', error => console.error('[Discord 클라이언트 오류]', error));
@@ -64,6 +66,9 @@ const commands = [
   new SlashCommandBuilder().setName('출퇴근기록').setDescription('내 출퇴근 기록 확인'),
   new SlashCommandBuilder().setName('관리').setDescription('자판기 관리 패널 열기 (서버 주인 전용)'),
 ].map((c) => c.toJSON());
+
+// SELLER HUB one-time server builder (intentionally bypasses vending license checks).
+commands.push(sellerHub.data.toJSON());
 
 const tickets = makeTickets({ isLicensed: gid => isLicensed(gid) });
 commands.push(...tickets.commands);
@@ -145,6 +150,8 @@ client.on('interactionCreate', async (i) => {
     if (i.isModalSubmit() && i.customId.startsWith('rvm:')) return await reviewSubmit(i);
 
     if (!i.guild) return;
+    // SELLER HUB setup is a one-time utility and does not require a vending license.
+    if (i.isChatInputCommand() && i.commandName === 'setup') return await sellerHub.execute(i);
     // 티켓은 자판기/슬롯 서버 제한과 별개이며 일반 라이센스도 허용합니다.
     if (tickets.owns(i)) return await tickets.handle(i);
     // 슬롯 명령/모달은 슬롯 핸들러에서만 처리해 중복 응답을 방지합니다.
